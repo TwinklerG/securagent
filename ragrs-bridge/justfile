@@ -1,0 +1,78 @@
+set dotenv-load
+set shell := ["bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# Aliases
+# -----------------------------------------------------------------------------
+
+alias b  := build
+alias bd := build-debug
+alias cl := clean
+alias l  := lint
+alias f  := format
+alias c  := check
+alias ca := check-all
+alias r  := run
+
+# -----------------------------------------------------------------------------
+# Core Development & Build
+# -----------------------------------------------------------------------------
+
+# List available commands
+@_default:
+    just --list --unsorted
+
+# Build (release)
+@build:
+    cargo build --release
+
+# Build (debug)
+@build-debug:
+    cargo build
+
+# Clean build artifacts
+[confirm: "Remove all build artifacts? (target/)"]
+@clean:
+    cargo clean
+
+# -----------------------------------------------------------------------------
+# Code Quality
+# -----------------------------------------------------------------------------
+
+# Format all code
+@format:
+    cargo fmt --all
+
+# Check formatting without writing
+@format-check:
+    cargo fmt --all --check
+
+# Run Clippy lints
+@lint:
+    cargo clippy --all-targets
+
+# Run Clippy and auto-fix
+@fix:
+    cargo clippy --all-targets --fix --allow-dirty --allow-staged
+
+# Type-check
+@check:
+    cargo check --all-targets
+
+# Run all quality checks: format + check + lint
+@check-all:
+    just format-check
+    just check
+    just lint
+
+# -----------------------------------------------------------------------------
+# Running
+# -----------------------------------------------------------------------------
+
+# Run the bridge CLI (reads JSON from stdin)
+@run *args:
+    cargo run --release -- {{ args }}
+
+# Run in debug mode
+@run-debug *args:
+    cargo run -- {{ args }}

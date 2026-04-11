@@ -1,0 +1,116 @@
+set dotenv-load
+set shell := ["bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# Aliases
+# -----------------------------------------------------------------------------
+
+alias d  := dev
+alias b  := build
+alias bd := build-debug
+alias cl := clean
+alias l  := lint
+alias f  := format
+alias c  := check
+alias ca := check-all
+alias fi := fix
+alias t  := test
+alias ta := test-all
+alias r  := run
+
+# -----------------------------------------------------------------------------
+# Core Development & Build
+# -----------------------------------------------------------------------------
+
+# 列出所有可用命令
+@_default:
+    just --list --unsorted
+
+# 以开发模式运行（debug 构建）
+@dev *args:
+    cargo fmt --all
+    cargo run -- {{ args }}
+
+# 以发布模式运行（release 构建）
+@run *args:
+    cargo fmt --all
+    cargo run --release -- {{ args }}
+
+# 构建所有 crate（release）
+@build:
+    cargo build --release --workspace
+
+# 构建所有 crate（debug）
+@build-debug:
+    cargo build --workspace
+
+# 清理构建产物
+[confirm: "确认清理所有构建产物？(target/)"]
+@clean:
+    cargo clean
+
+# -----------------------------------------------------------------------------
+# Code Quality
+# -----------------------------------------------------------------------------
+
+# 格式化所有代码
+@format:
+    cargo fmt --all
+
+# 仅检查格式（不写入）
+@format-check:
+    cargo fmt --all --check
+
+# 运行 Clippy 检查
+@lint:
+    cargo clippy --workspace --all-targets
+
+# 运行 Clippy 并自动修复
+@fix:
+    cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
+
+# 类型检查所有 crate
+@check:
+    cargo check --workspace --all-targets
+
+# 执行全部质量检查：格式 + 类型检查 + lint
+@check-all:
+    just format-check
+    just check
+    just lint
+
+# -----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+
+# 运行库测试
+@test *args:
+    cargo test --workspace --lib {{ args }}
+
+# 运行全部测试（库 + 集成 + 文档）
+@test-all *args:
+    cargo test --workspace {{ args }}
+
+# 运行测试并显示标准输出
+@test-verbose *args:
+    cargo test --workspace -- --nocapture {{ args }}
+
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+# 更新所有依赖
+@update:
+    cargo update --workspace
+
+# 显示依赖树
+@deps:
+    cargo tree --workspace
+
+# 显示过时依赖（需要 cargo-outdated）
+@outdated:
+    cargo outdated --workspace
+
+# 生成并打开文档
+@doc:
+    cargo doc --workspace --no-deps --open

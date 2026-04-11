@@ -1,0 +1,24 @@
+{
+  "Deserialization of Untrusted Data": ["CWE-502"],
+  "Improper Control of Generation of Code (“Code Injection”)": ["CWE-94"],
+  "Improper Input Validation": ["CWE-20"],
+  "Improper Limitation of a Pathname to a Restricted Directory (“Path Traversal”)": [
+    "CWE-22"
+  ],
+  "Improper Neutralization of Input During Web Page Generation (“Cross-site Scripting”)": [
+    "CWE-79"
+  ],
+  "Improper Neutralization of Special Elements used in an OS Command (“OS Command Injection”)": [
+    "CWE-78"
+  ],
+  "Improper Neutralization of Special Elements used in an SQL Command (“SQL Injection”)": [
+    "CWE-89"
+  ],
+  "Improper Output Neutralization for Logs": ["CWE-117"],
+  "Improper Restriction of XML External Entity Reference": ["CWE-611"],
+  "Integer Overflow or Wraparound": ["CWE-190"],
+  "NULL Pointer Dereference": ["CWE-476"],
+  "Out-of-bounds Write": ["CWE-787"],
+  "URL Redirection to Untrusted Site (“Open Redirect”)": ["CWE-601"],
+  "safe": []
+}

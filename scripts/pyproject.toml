@@ -1,0 +1,9 @@
+[project]
+name = "securagent-scripts"
+version = "0.1.0"
+description = "安全代码审计 Agent 数据集准备脚本"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=3.0",
+    "requests>=2.32",
+]
