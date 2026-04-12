@@ -23,3 +23,9 @@ pub enum Error {
     #[error("IO 错误：{0}")]
     Io(#[from] io::Error),
 }
+
+impl From<ragrs::Error> for Error {
+    fn from(e: ragrs::Error) -> Self {
+        Self::Llm(e.to_string())
+    }
+}

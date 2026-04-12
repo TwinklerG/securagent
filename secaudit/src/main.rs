@@ -7,16 +7,20 @@
 mod agent;
 mod config;
 mod error;
+mod interactive;
 mod llm;
 mod output;
 mod prompt;
 mod server;
+mod session;
 mod tools;
 mod trajectory;
 
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 
 use clap::Parser;
 use colored::Colorize;
@@ -27,7 +31,7 @@ use agent::strategy;
 #[derive(Parser)]
 #[command(version, about = "安全代码审计 LLM Agent")]
 struct Cli {
-    /// 待审计的源码文件路径（CLI 模式必需）
+    /// 待审计的源码文件路径（省略则进入交互模式）
     #[arg(value_name = "FILE")]
     target: Option<String>,
 
@@ -39,15 +43,15 @@ struct Cli {
     #[arg(short = 'f', long, default_value = "text")]
     format: String,
 
-    /// trajectory 导出路径（可选，仅 CLI 模式）
+    /// trajectory 导出路径（可选，仅单文件模式）
     #[arg(short, long, value_name = "PATH")]
     output: Option<String>,
 
-    /// 运行模式：cli（默认）、web
-    #[arg(short, long, default_value = MODE_CLI)]
+    /// 运行模式：auto（默认）、web
+    #[arg(short, long, default_value = MODE_AUTO)]
     mode: String,
 
-    /// 推理策略：react（默认）、reflexion
+    /// 推理策略：react（默认）、reflexion（仅单文件模式）
     #[arg(short, long, default_value = strategy::STRATEGY_REACT)]
     strategy: String,
 
@@ -72,8 +76,8 @@ const EXTENSION_MAP: &[(&[&str], &str)] = &[
 /// 未知语言的默认名称
 const UNKNOWN_LANGUAGE: &str = "unknown";
 
-/// CLI 运行模式标识
-const MODE_CLI: &str = "cli";
+/// 自动模式标识（根据是否有文件参数决定行为）
+const MODE_AUTO: &str = "auto";
 /// Web 运行模式标识
 const MODE_WEB: &str = "web";
 
@@ -99,22 +103,23 @@ async fn main() {
 
     if cli.mode == MODE_WEB {
         server::start(cli.port, config).await;
+    } else if let Some(target) = &cli.target {
+        run_single_file(&cli, config, target).await;
     } else {
-        run_cli(cli, config).await;
+        run_interactive(config).await;
     }
 }
 
-/// CLI 模式：读取文件并执行审计
-async fn run_cli(cli: Cli, mut config: config::Config) {
-    let target = if let Some(t) = &cli.target {
-        t.clone()
-    } else {
-        eprintln!("{}: CLI 模式需要指定源码文件路径", "错误".red().bold());
-        process::exit(1);
-    };
+/// 交互模式：进入 REPL 循环
+async fn run_interactive(config: config::Config) {
+    let work_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    interactive::run(config, work_dir).await;
+}
 
+/// 单文件审计模式
+async fn run_single_file(cli: &Cli, mut config: config::Config, target: &str) {
     // 读取源码文件
-    let code = match fs::read_to_string(&target) {
+    let code = match fs::read_to_string(target) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{}: 无法读取文件 {target}: {e}", "错误".red().bold(),);
@@ -123,7 +128,10 @@ async fn run_cli(cli: Cli, mut config: config::Config) {
     };
 
     // 检测语言
-    let language = cli.language.unwrap_or_else(|| detect_language(&target));
+    let language = cli
+        .language
+        .clone()
+        .unwrap_or_else(|| detect_language(target));
 
     // 启动信息
     println!("{}", "secaudit -- 安全代码审计 Agent".bold());
@@ -134,13 +142,14 @@ async fn run_cli(cli: Cli, mut config: config::Config) {
 
     // 创建 Agent 并设置回调
     config.reasoning_strategy.clone_from(&cli.strategy);
-    let mut agent = agent::Agent::new(config);
+    let work_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut agent = agent::Agent::new(config, work_dir, Arc::new(|_| true));
     agent.on_state_change(output::cli::print_state);
     agent.on_think(output::cli::print_thinking);
     agent.on_tool_call(output::cli::print_tool_call);
 
     // 执行审计
-    match agent.audit(&code, &language, &target).await {
+    match agent.audit(&code, &language, target).await {
         Ok(report) => {
             output::cli::print_separator();
 
@@ -163,7 +172,7 @@ async fn run_cli(cli: Cli, mut config: config::Config) {
             // 导出 trajectory JSON
             if let Some(output_path) = &cli.output {
                 let sample =
-                    trajectory::to_multi_turn_sample(&report.messages, &report.findings, &target);
+                    trajectory::to_multi_turn_sample(&report.messages, &report.findings, target);
                 match serde_json::to_string_pretty(&sample) {
                     Ok(json) => {
                         if let Err(e) = fs::write(output_path, json) {

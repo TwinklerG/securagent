@@ -22,13 +22,9 @@ pub fn print_state(state: &AgentState) {
             format!("[>> {label}] 第 {} 轮 ReAct 循环", iteration + 1).yellow()
         }
         AgentState::Analyzing => format!("[>> {label}] 处理工具返回结果").yellow(),
-        AgentState::Retrying { tool_name, attempt } => {
-            format!("[>> {label}] 重试工具 {tool_name}（第 {attempt} 次）").yellow()
-        }
         AgentState::Reflecting => format!("[>> {label}] 回顾发现，剔除误报").blue(),
         AgentState::Extracting => format!("[>> {label}] 提取结构化发现").blue(),
         AgentState::Reporting => format!("[>> {label}] 生成审计报告").blue(),
-        AgentState::Error { message } => format!("[>> {label}] {message}").red(),
         AgentState::Done => format!("[>> {label}] 审计完成").green(),
     };
     println!("{text}");
@@ -59,6 +55,25 @@ pub fn print_tool_call(name: &str, args: &str) {
         "[工具]".cyan().bold(),
         name.cyan(),
         args.cyan()
+    );
+}
+
+/// 工具结果预览最大字符数
+const TOOL_RESULT_MAX_CHARS: usize = 300;
+
+/// 打印工具执行结果（截断显示）
+pub fn print_tool_result(name: &str, result: &str) {
+    let preview = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
+        let truncated: String = result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
+        format!("{truncated}{ELLIPSIS}")
+    } else {
+        result.to_owned()
+    };
+    println!(
+        "{} {} → {}",
+        "[结果]".dimmed(),
+        name.dimmed(),
+        preview.dimmed()
     );
 }
 

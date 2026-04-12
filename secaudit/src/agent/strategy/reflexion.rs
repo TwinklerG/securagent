@@ -11,7 +11,7 @@ use crate::agent::executor::{ReActExecutor, StepResult};
 use crate::agent::state::AgentState;
 use crate::config::Config;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Role};
+use crate::llm::ChatMessage;
 use crate::prompt;
 
 /// 默认最大反思轮次
@@ -152,22 +152,7 @@ impl Strategy for ReflexionStrategy {
             }
         }
 
-        // 返回最终总结
-        let summary = executor
-            .messages()
-            .iter()
-            .rev()
-            .find_map(|m| {
-                if matches!(m.role, Role::Assistant) {
-                    m.content.as_deref().map(ToOwned::to_owned)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
         Ok(StrategyResult {
-            summary,
             iterations_used: total_iterations,
         })
     }

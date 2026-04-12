@@ -8,13 +8,23 @@ use crate::agent::executor::{ReActExecutor, StepResult};
 use crate::agent::state::AgentState;
 use crate::config::Config;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Role};
+use crate::llm::ChatMessage;
 
 /// 开始执行的用户指令
-const EXECUTION_INSTRUCTION: &str = "请按照审计计划开始执行。使用可用的工具进行分析。";
+const EXECUTION_INSTRUCTION: &str = "\
+请按照审计计划，逐一分析代码中的安全问题。\
+对每个发现给出 CWE 编号、严重度、位置和修复建议。\
+如需运行 semgrep 扫描可调用工具，否则直接分析即可。";
 
 /// 连续无工具调用的空循环阈值（超过则提前终止）
 const MAX_EMPTY_ROUNDS: u32 = 2;
+
+/// 接近迭代上限时注入催促 prompt 的剩余轮次阈值
+const WRAP_UP_THRESHOLD: u32 = 3;
+
+/// 催促 LLM 收尾的提示消息
+const MSG_WRAP_UP: &str = "\
+你即将达到工具调用轮次上限。请立即总结你的审计发现并给出最终报告，不要再调用工具。";
 
 /// `ReAct` 推理策略。
 pub struct ReactStrategy;
@@ -37,6 +47,11 @@ impl Strategy for ReactStrategy {
         loop {
             if iteration >= max_iter {
                 break;
+            }
+
+            // 接近上限时注入催促 prompt，引导 LLM 收尾
+            if iteration + WRAP_UP_THRESHOLD == max_iter {
+                executor.push_message(ChatMessage::user(MSG_WRAP_UP));
             }
 
             events.set_state(AgentState::Executing { iteration });
@@ -79,22 +94,7 @@ impl Strategy for ReactStrategy {
             iteration += 1;
         }
 
-        // 返回最后一条 assistant 消息作为小结
-        let summary = executor
-            .messages()
-            .iter()
-            .rev()
-            .find_map(|m| {
-                if matches!(m.role, Role::Assistant) {
-                    m.content.as_deref().map(ToOwned::to_owned)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
         Ok(StrategyResult {
-            summary,
             iterations_used: iteration,
         })
     }

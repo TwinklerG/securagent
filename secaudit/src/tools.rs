@@ -1,21 +1,33 @@
-mod code_parser;
-mod cwe_knowledge_base;
 mod dependency_checker;
+mod execute_command;
+mod find_files;
+mod list_directory;
 mod nvd_lookup;
-mod pattern_scanner;
+mod read_file;
+mod search_content;
 mod semgrep_scanner;
+pub(crate) mod shared;
+mod write_file;
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
-pub use code_parser::CodeParser;
-pub use cwe_knowledge_base::CweKnowledgeBase;
 pub use dependency_checker::DependencyChecker;
+pub use execute_command::ExecuteCommand;
+pub use find_files::FindFiles;
+pub use list_directory::ListDirectory;
 pub use nvd_lookup::NvdLookup;
-pub use pattern_scanner::PatternScanner;
+pub use read_file::ReadFile;
+pub use search_content::SearchContent;
 pub use semgrep_scanner::SemgrepScanner;
+pub use write_file::WriteFile;
 
-use crate::config::Config;
 use crate::error::Error;
+
+/// 确认回调：Agent 在执行危险操作前调用，返回 true 表示用户同意。
+pub type ConfirmFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// 工具 trait，定义 Agent 可调用的外部能力接口。
 ///
@@ -39,21 +51,29 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, params: &serde_json::Value) -> Result<String, Error>;
 }
 
-/// 创建默认工具集，包含所有内置安全审计工具。
-///
-/// 优先从配置的规则目录加载外部规则；加载失败时回退到内置默认规则。
-pub fn default_tools(config: &Config) -> Vec<Box<dyn Tool>> {
-    let scanner = PatternScanner::with_rules_dir(&config.rules_dir).unwrap_or_else(|e| {
-        tracing::warn!("加载外部规则失败，使用默认规则：{e}");
-        PatternScanner::new()
-    });
-
+/// 创建默认工具集（交互模式），包含通用文件操作工具和安全专用工具。
+pub fn default_tools(work_dir: PathBuf, confirm: ConfirmFn) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(CodeParser::new()),
-        Box::new(scanner),
-        Box::new(DependencyChecker),
-        Box::new(CweKnowledgeBase::new()),
+        Box::new(ReadFile::new(work_dir.clone())),
+        Box::new(ListDirectory::new(work_dir.clone())),
+        Box::new(SearchContent::new(work_dir.clone())),
+        Box::new(FindFiles::new(work_dir.clone())),
+        Box::new(ExecuteCommand::new(work_dir.clone(), Arc::clone(&confirm))),
+        Box::new(WriteFile::new(work_dir, confirm)),
         Box::new(SemgrepScanner::new()),
+        Box::new(DependencyChecker),
+        Box::new(NvdLookup::new()),
+    ]
+}
+
+/// 创建单文件审计专用工具集 — 仅包含只读分析工具。
+///
+/// 单文件审计时代码已内联在 prompt 中，不需要文件操作和命令执行工具。
+/// 限制工具集可避免 LLM 写入无关文件、安装软件等浪费行为。
+pub fn audit_tools() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(SemgrepScanner::new()),
+        Box::new(DependencyChecker),
         Box::new(NvdLookup::new()),
     ]
 }

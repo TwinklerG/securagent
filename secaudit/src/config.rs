@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::error::Error;
 
@@ -12,10 +12,7 @@ const DEFAULT_API_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "gpt-4o";
 
 /// 默认最大 `ReAct` 循环轮次
-const DEFAULT_MAX_ITERATIONS: u32 = 10;
-
-/// 默认规则文件目录
-const DEFAULT_RULES_DIR: &str = "rules";
+const DEFAULT_MAX_ITERATIONS: u32 = 40;
 
 /// 默认推理策略
 const DEFAULT_STRATEGY: &str = "react";
@@ -31,10 +28,20 @@ pub struct Config {
     pub model: String,
     /// 最大 `ReAct` 循环轮次
     pub max_iterations: u32,
-    /// 规则文件目录路径
-    pub rules_dir: PathBuf,
     /// 推理策略（react / reflexion）
     pub reasoning_strategy: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            api_base_url: DEFAULT_API_BASE_URL.into(),
+            api_key: String::new(),
+            model: DEFAULT_MODEL.into(),
+            max_iterations: DEFAULT_MAX_ITERATIONS,
+            reasoning_strategy: DEFAULT_STRATEGY.into(),
+        }
+    }
 }
 
 impl Config {
@@ -59,9 +66,6 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_ITERATIONS);
 
-        let rules_dir = var(format!("{ENV_PREFIX}RULES_DIR"))
-            .map_or_else(|_| PathBuf::from(DEFAULT_RULES_DIR), PathBuf::from);
-
         let reasoning_strategy =
             var(format!("{ENV_PREFIX}STRATEGY")).unwrap_or_else(|_| DEFAULT_STRATEGY.into());
 
@@ -70,8 +74,18 @@ impl Config {
             api_key,
             model,
             max_iterations,
-            rules_dir,
             reasoning_strategy,
         })
+    }
+
+    /// 从配置文件加载（骨架方法，迭代三实现配置文件分层）。
+    ///
+    /// # Errors
+    ///
+    /// 文件不存在或解析失败时返回错误。
+    #[expect(dead_code, reason = "迭代三预留接口")]
+    pub fn from_file(_path: &Path) -> Result<Self, Error> {
+        // TODO: 迭代三实现 TOML/JSON 配置文件解析
+        Err(Error::Config("配置文件加载尚未实现".into()))
     }
 }

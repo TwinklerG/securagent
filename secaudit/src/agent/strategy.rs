@@ -14,9 +14,6 @@ use crate::error::Error;
 /// 策略执行结果。
 #[derive(Debug)]
 pub struct StrategyResult {
-    /// 审计摘要文本（供后续反思阶段使用）
-    #[expect(dead_code, reason = "反思阶段独立生成 summary，此字段留作扩展")]
-    pub summary: String,
     /// 实际使用的迭代轮次
     pub iterations_used: u32,
 }

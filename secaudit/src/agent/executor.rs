@@ -1,7 +1,7 @@
 // ReAct 循环执行器
 
 use crate::error::Error;
-use crate::llm::{ChatMessage, LlmClient, ToolCallResponse, ToolDefinition};
+use crate::llm::{ChatMessage, HttpLlmClient, ToolCallResponse, ToolDefinition};
 use crate::tools::Tool;
 
 /// `ReAct` 单步执行结果
@@ -15,7 +15,7 @@ pub enum StepResult {
 /// `ReAct` 循环执行器，管理对话历史并协调 LLM 与工具交互。
 pub struct ReActExecutor<'a> {
     /// LLM 客户端引用
-    llm: &'a LlmClient,
+    llm: &'a HttpLlmClient,
     /// 可用工具列表
     tools: &'a [Box<dyn Tool>],
     /// 工具定义（发送给 LLM 的描述信息）
@@ -27,7 +27,7 @@ pub struct ReActExecutor<'a> {
 impl<'a> ReActExecutor<'a> {
     /// 创建执行器，自动从 `Tool` trait 构建工具定义列表。
     #[must_use]
-    pub fn new(llm: &'a LlmClient, tools: &'a [Box<dyn Tool>]) -> Self {
+    pub fn new(llm: &'a HttpLlmClient, tools: &'a [Box<dyn Tool>]) -> Self {
         let tool_defs: Vec<ToolDefinition> = tools
             .iter()
             .map(|t| ToolDefinition {
