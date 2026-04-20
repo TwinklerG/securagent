@@ -252,6 +252,11 @@ impl HttpLlmClient {
             .with_api_base(&config.api_base_url)
             .with_api_key(&config.api_key);
 
+        let openai_config = openai_config
+            .clone()
+            .with_header("user-agent", "Go-http-client/1.1")
+            .unwrap_or(openai_config);
+
         Self {
             client: async_openai::Client::with_config(openai_config),
             model: config.model.clone(),
@@ -285,7 +290,7 @@ impl HttpLlmClient {
                 .iter()
                 .map(to_chat_completion_tool)
                 .collect::<Result<_, _>>()?;
-            builder.tools(chat_tools);
+            // builder.tools(chat_tools);
         }
 
         let request = builder
