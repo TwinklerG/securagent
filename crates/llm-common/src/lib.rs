@@ -290,7 +290,7 @@ impl HttpLlmClient {
                 .iter()
                 .map(to_chat_completion_tool)
                 .collect::<Result<_, _>>()?;
-            // builder.tools(chat_tools);
+            builder.tools(chat_tools);
         }
 
         let request = builder
