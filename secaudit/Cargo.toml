@@ -7,7 +7,6 @@ edition = "2024"
 ragrs = { path = "../ragrs" }
 llm-common = { path = "../crates/llm-common" }
 async-openai.workspace = true
-dotenv.workspace = true
 async-trait.workspace = true
 axum = "0.8"
 chrono = "0.4"
