@@ -17,7 +17,7 @@ const DEFAULT_MAX_ITERATIONS: u32 = 40;
 /// 默认推理策略
 const DEFAULT_STRATEGY: &str = "react";
 
-/// 应用配置，支持环境变量（`SECAUDIT_` 前缀）和配置文件两种来源。
+/// 应用配置，支持 `.env` 文件和环境变量（`SECAUDIT_` 前缀）两种来源。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
     /// LLM API 基础 URL
@@ -45,13 +45,20 @@ impl Default for Config {
 }
 
 impl Config {
-    /// 从环境变量加载配置，未设置的字段使用默认值。
+    /// 从 `.env` 文件和环境变量加载配置，未设置的字段使用默认值。
+    ///
+    /// 加载顺序：
+    /// 1. 尝试从当前目录的 `.env` 文件加载（若存在）
+    /// 2. 覆盖环境变量（`SECAUDIT_` 前缀）
     ///
     /// # Errors
     ///
     /// 当必需的环境变量（如 `SECAUDIT_API_KEY`）缺失时返回错误。
     pub fn from_env() -> Result<Self, Error> {
         use std::env::var;
+
+        // 尝试加载 .env 文件（若不存在则忽略错误）
+        let _ = dotenv::dotenv();
 
         let api_key = var(format!("{ENV_PREFIX}API_KEY"))
             .map_err(|err| Error::Config(format!("环境变量 SECAUDIT_API_KEY 未设置：{err}")))?;
@@ -78,14 +85,50 @@ impl Config {
         })
     }
 
-    /// 从配置文件加载（骨架方法，迭代三实现配置文件分层）。
+    /// 从指定路径的 `.env` 文件加载配置。
+    ///
+    /// # Errors
+    ///
+    /// 当文件不存在或必需的环境变量缺失时返回错误。
+    #[allow(dead_code)]
+    pub fn from_env_file(path: &Path) -> Result<Self, Error> {
+        use std::env::var;
+
+        dotenv::from_path(path)
+            .map_err(|err| Error::Config(format!("加载 .env 文件失败：{:?}", err)))?;
+
+        let api_key = var(format!("{ENV_PREFIX}API_KEY"))
+            .map_err(|err| Error::Config(format!("环境变量 SECAUDIT_API_KEY 未设置：{err}")))?;
+
+        let api_base_url = var(format!("{ENV_PREFIX}API_BASE_URL"))
+            .unwrap_or_else(|_| DEFAULT_API_BASE_URL.into());
+
+        let model = var(format!("{ENV_PREFIX}MODEL")).unwrap_or_else(|_| DEFAULT_MODEL.into());
+
+        let max_iterations = var(format!("{ENV_PREFIX}MAX_ITERATIONS"))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_ITERATIONS);
+
+        let reasoning_strategy =
+            var(format!("{ENV_PREFIX}STRATEGY")).unwrap_or_else(|_| DEFAULT_STRATEGY.into());
+
+        Ok(Self {
+            api_base_url,
+            api_key,
+            model,
+            max_iterations,
+            reasoning_strategy,
+        })
+    }
+
+    /// 从配置文件加载（调用 `.env` 文件加载逻辑）。
     ///
     /// # Errors
     ///
     /// 文件不存在或解析失败时返回错误。
-    #[expect(dead_code, reason = "迭代三预留接口")]
-    pub fn from_file(_path: &Path) -> Result<Self, Error> {
-        // TODO: 迭代三实现 TOML/JSON 配置文件解析
-        Err(Error::Config("配置文件加载尚未实现".into()))
+    #[allow(dead_code)]
+    pub fn from_file(path: &Path) -> Result<Self, Error> {
+        Self::from_env_file(path)
     }
 }

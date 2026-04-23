@@ -39,6 +39,11 @@ securagent/
 ### 环境变量
 
 ```bash
+# 方式一：从 .env.example 复制并填写
+cp .env.example .env
+# 编辑 .env 文件填入你的 API Key
+
+# 方式二：直接导出环境变量
 export SECAUDIT_API_KEY="your-api-key"
 export SECAUDIT_API_BASE_URL="https://api.openai.com/v1"  # 可选，默认 OpenAI
 export SECAUDIT_MODEL="gpt-4o"                             # 可选
