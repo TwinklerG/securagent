@@ -2,11 +2,10 @@
 
 use std::iter::repeat_n;
 
+use super::truncate_with_ellipsis;
 use colored::Colorize;
 use secaudit_agent::AuditReport;
 use secaudit_agent::state::AgentState;
-
-use super::truncate_with_ellipsis;
 
 /// 分隔线长度
 const SEPARATOR_LEN: usize = 60;
@@ -31,17 +30,6 @@ pub fn print_state(state: &AgentState) {
     println!("{text}");
 }
 
-/// 思考摘要最大字符数
-const THINKING_MAX_CHARS: usize = 200;
-
-/// 打印思考过程
-pub fn print_thinking(text: &str) {
-    // 截取首行，限制长度避免刷屏
-    let preview = text.lines().next().unwrap_or(text);
-    let display = truncate_with_ellipsis(preview, THINKING_MAX_CHARS);
-    println!("{} {}", "[思考]".dimmed(), display.dimmed());
-}
-
 /// 打印工具调用
 pub fn print_tool_call(name: &str, args: &str) {
     println!(
@@ -52,18 +40,15 @@ pub fn print_tool_call(name: &str, args: &str) {
     );
 }
 
-/// 工具结果预览最大字符数
-const TOOL_RESULT_MAX_CHARS: usize = 300;
+/// 思考摘要最大字符数
+const THINKING_MAX_CHARS: usize = 200;
 
-/// 打印工具执行结果（截断显示）
-pub fn print_tool_result(name: &str, result: &str) {
-    let preview = truncate_with_ellipsis(result, TOOL_RESULT_MAX_CHARS);
-    println!(
-        "{} {} → {}",
-        "[结果]".dimmed(),
-        name.dimmed(),
-        preview.dimmed()
-    );
+/// 打印思考过程
+pub fn print_thinking(text: &str) {
+    // 截取首行，限制长度避免刷屏
+    let preview = text.lines().next().unwrap_or(text);
+    let display = truncate_with_ellipsis(preview, THINKING_MAX_CHARS);
+    println!("{} {}", "[思考]".dimmed(), display.dimmed());
 }
 
 /// 打印分隔线

@@ -104,14 +104,14 @@ def test_bypass_scenarios():
         status = "✅ 安全" if safe else ("🚫 阻止" if blocked else "⚠️ 需确认")
         
         print(f"{status}: {description}")
-        print(f"   命令: {cmd}")
-        print(f"   白名单: {safe}, 黑名单: {blocked}")
+        print(f"   命令：{cmd}")
+        print(f"   白名单：{safe}, 黑名单：{blocked}")
         
         # 分析绕过可能性
         if safe and any(x in cmd for x in [';', '&&', '||', '|', '`', '$(']):
-            print(f"   ⚠️ 警告: 白名单命令包含命令注入字符!")
+            print(f"   ⚠️ 警告：白名单命令包含命令注入字符!")
         elif not blocked and any(x in cmd for x in ['rm -rf', 'dd', 'mkfs']):
-            print(f"   ⚠️ 警告: 危险命令不在黑名单中!")
+            print(f"   ⚠️ 警告：危险命令不在黑名单中!")
         print()
 
 def analyze_security_weaknesses():
@@ -166,8 +166,8 @@ def analyze_security_weaknesses():
     for weakness in weaknesses:
         print(f"【{weakness['severity']}】{weakness['title']}")
         print(f"  CWE: {weakness['cwe']}")
-        print(f"  描述: {weakness['description']}")
-        print(f"  示例: {weakness['example']}")
+        print(f"  描述：{weakness['description']}")
+        print(f"  示例：{weakness['example']}")
         print()
 
 def generate_exploit_payloads():
@@ -207,9 +207,9 @@ def generate_exploit_payloads():
         blocked = is_blocked_rust(p['payload'])
         
         print(f"【{p['name']}】")
-        print(f"  载荷: {p['payload'][:80]}...")
-        print(f"  效果: {p['effect']}")
-        print(f"  检测: 白名单={safe}, 黑名单={blocked}")
+        print(f"  载荷：{p['payload'][:80]}...")
+        print(f"  效果：{p['effect']}")
+        print(f"  检测：白名单={safe}, 黑名单={blocked}")
         print()
 
 if __name__ == "__main__":

@@ -2,3 +2,5 @@ target/
 datasets/
 .env
 __pycache__
+AGENTS.md
+CLAUDE.md

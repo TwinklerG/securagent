@@ -9,7 +9,11 @@ secaudit-core = { path = "../crates/secaudit-core" }
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
-rustyline = "15"
+crossterm = "0.29"
+ratatui = "0.30"
+pulldown-cmark = "0.13"
+unicode-width = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
