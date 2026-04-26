@@ -36,9 +36,9 @@ check: fmt-check clippy
 run *ARGS:
     cargo run -p secaudit -- {{ARGS}}
 
-# 运行 secaudit Web 模式
-run-web PORT="8080":
-    cargo run -p secaudit -- -m web -p {{PORT}}
+# 运行 secaudit 非交互 chat 调试模式（JSON 输出）
+run-chat *ARGS:
+    cargo run -p secaudit -- --mode chat {{ARGS}}
 
 # 清理构建产物
 clean:

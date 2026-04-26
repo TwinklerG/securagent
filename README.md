@@ -1,16 +1,16 @@
 # securagent — 安全代码审计 LLM Agent
 
-基于 ReAct/Reflexion 推理框架的安全代码审计 Agent，支持 CLI 交互 / 单文件审计 / Web 会话三种模式。
+基于 ReAct/Reflexion 推理框架的安全代码审计 Agent，支持 CLI 交互 / 单文件审计 / 非交互 chat 调试三种模式。
 
 ## 架构概览
 
 ```
 securagent/
-├── secaudit/                  # 应用入口（CLI / Web / 输出渲染）
+├── secaudit/                  # 应用入口（CLI / 非交互调试 / 输出渲染）
 │   └── src/
 │       ├── main.rs            # 命令行入口与运行模式分发
 │       ├── interactive.rs     # 交互式 REPL
-│       ├── server.rs          # Web 会话 API（Axum + SSE）
+│       ├── headless.rs        # 非交互 chat 结果聚合与结构化输出
 │       └── output/            # CLI/JSON/Markdown 输出
 └── crates/
     ├── secaudit-core/         # 共享核心类型（Config / Error）
@@ -62,44 +62,40 @@ just run
 
 交互模式下 Agent 拥有完整工具集（文件读写、命令执行、搜索等），可对整个项目进行多轮审计。
 
-### Web 模式
+### 非交互 chat 调试模式
 
 ```bash
-# 启动会话式 API 服务器（默认端口 8080）
-just run-web
+# 直接传入单条消息（JSON 输出）
+just run-chat --message "审计当前项目的高风险问题"
 
-# 指定端口
-just run-web 3001
+# 从 stdin 读取单条消息（便于脚本/外部 agent 对接）
+echo "检查 src/main.rs 的命令注入风险" | just run-chat
+
+# 传入多轮消息（JSON 数组）
+just run-chat --messages-json '["先审计目录结构","继续检查命令执行风险","最后给出总结"]'
+
+# 确认策略（默认 deny）：deny / allow / ask
+just run-chat --message "运行 cargo clippy 并总结结果" --confirm-mode ask
+
+# 文本输出（便于人读）
+just run-chat --message "审计当前目录" --output-format text
 ```
 
-Web 模式提供会话式 API：
+非交互 chat 适用于外部 agent 或脚本调用，执行一次完整对话后输出结构化结果：
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/sessions` | POST | 创建会话，指定 `work_dir` |
-| `/api/sessions/:id/messages` | POST | 异步发送消息（结果通过 SSE 推送） |
-| `/api/sessions/:id/chat` | POST | **同步聊天**（等待完成后一次性返回） |
-| `/api/sessions/:id/events` | GET | SSE 事件流（状态/思考/工具调用/结果） |
-| `/api/sessions/:id/history` | GET | 获取会话完整历史 |
-| `/api/sessions/:id/confirm` | POST | 回复确认请求 |
-| `/api/health` | GET | 健康检查 |
-
-`/chat` 端点适合 AI Agent 或脚本调用，无需解析 SSE 流，返回完整结构化响应：
-
-```json
-{
-  "message": "Agent 最终回复",
-  "tool_calls": [{ "name": "...", "args": "...", "result": "..." }],
-  "state_history": ["执行中", "分析中", "完成"],
-  "duration_ms": 12345
-}
-```
+输出字段包括：
+- `status`：`success`/`error`
+- `final_message` 或 `error`
+- `turns`：每轮用户输入、助手输出、错误与耗时
+- `trace`：`state_history`、`think_events`、`tool_calls`、`confirm_events`
+- `session`：`id`、`created_at`、`messages`（可直接用于评估）
+- `duration_ms`、`work_dir`、`confirm_mode`
 
 ## 工具集
 
 Agent 根据运行模式加载不同工具集：
 
-**交互 / Web 模式**（9 个工具）：
+**交互 / 非交互 chat 模式**（9 个工具）：
 
 | 工具 | 描述 | 外部交互 | 需确认 |
 |------|------|---------|--------|
@@ -116,6 +112,7 @@ Agent 根据运行模式加载不同工具集：
 **单文件审计模式**（3 个只读工具）：`semgrep_scanner`、`dependency_checker`、`nvd_lookup`
 
 所有文件操作工具共享沙箱路径校验逻辑（`crates/secaudit-tools/src/tools/shared.rs`），确保路径不逃逸出工作目录。
+所有运行模式统一使用**进程启动目录（cwd）**作为工作目录。
 
 ## 推理策略
 

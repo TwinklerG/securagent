@@ -36,6 +36,32 @@ pub struct LlmConfig {
     pub model: String,
 }
 
+/// Token 用量统计。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// 提示词 token 数
+    pub prompt_tokens: u64,
+    /// 生成 token 数
+    pub completion_tokens: u64,
+    /// 总 token 数
+    pub total_tokens: u64,
+}
+
+impl TokenUsage {
+    /// 把 `other` 累加到当前统计。
+    pub fn add_assign(&mut self, other: &Self) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.total_tokens += other.total_tokens;
+    }
+
+    /// 是否为零用量。
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.prompt_tokens == 0 && self.completion_tokens == 0 && self.total_tokens == 0
+    }
+}
+
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
 /// LLM-as-Judge 评估时使用的低温参数
@@ -70,6 +96,9 @@ pub struct ChatMessage {
     /// 工具调用结果对应的调用 ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 本条消息对应的 token 用量（通常仅 assistant 消息有值）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 impl ChatMessage {
@@ -81,6 +110,7 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            usage: None,
         }
     }
 
@@ -92,6 +122,7 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            usage: None,
         }
     }
 
@@ -103,6 +134,7 @@ impl ChatMessage {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            usage: None,
         }
     }
 }
@@ -332,12 +364,18 @@ impl HttpLlmClient {
 
         // 转换为内部类型
         let tool_calls = message.tool_calls.as_ref().map(|tc| from_tool_calls(tc));
+        let usage = response.usage.as_ref().map(|usage| TokenUsage {
+            prompt_tokens: usage.prompt_tokens.into(),
+            completion_tokens: usage.completion_tokens.into(),
+            total_tokens: usage.total_tokens.into(),
+        });
 
         Ok(ChatMessage {
             role: Role::Assistant,
             content: message.content,
             tool_calls,
             tool_call_id: None,
+            usage,
         })
     }
 
