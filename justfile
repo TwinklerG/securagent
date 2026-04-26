@@ -1,5 +1,6 @@
 # securagent Justfile — Rust workspace 构建命令
-set dotenv-load
+set dotenv-required
+set dotenv-override
 
 default:
     @just --list
@@ -14,7 +15,7 @@ build-debug:
 
 # 运行 clippy 检查
 clippy:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # 运行测试
 test:
@@ -28,8 +29,8 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# 检查（clippy + fmt-check）
-check: clippy fmt-check
+# 质量检查（格式 + Clippy）
+check: fmt-check clippy
 
 # 运行 secaudit CLI
 run *ARGS:

@@ -61,7 +61,12 @@ fn format_lines(lines: &[&str], offset: usize, limit: usize) -> String {
     let end_idx = (start_idx + limit).min(total);
 
     let mut output = String::new();
-    for (i, line) in lines.get(start_idx..end_idx).into_iter().flatten().enumerate() {
+    for (i, line) in lines
+        .get(start_idx..end_idx)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let line_no = start_idx + i + 1;
         let _ = writeln!(output, "{line_no:>LINE_NUMBER_WIDTH$}\t{line}");
     }
@@ -119,10 +124,7 @@ impl Tool for ReadFile {
         let resolved = resolve_sandbox_path(&self.work_dir, path_str)?;
 
         if !resolved.is_file() {
-            return Err(Error::Tool(format!(
-                "路径不是文件：{}",
-                resolved.display()
-            )));
+            return Err(Error::Tool(format!("路径不是文件：{}", resolved.display())));
         }
 
         // 异步读取文件
@@ -151,7 +153,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_lines_basic() {
+    fn format_lines_basic() {
         let lines = vec!["fn main() {", "    println!(\"hi\");", "}"];
         let output = format_lines(&lines, 1, 2000);
         assert!(output.contains("1\t"), "应包含行号 1");
@@ -161,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_lines_with_limit() {
+    fn format_lines_with_limit() {
         let lines: Vec<&str> = vec!["line"; 100];
         let output = format_lines(&lines, 1, 10);
         assert!(
@@ -171,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_lines_with_offset() {
+    fn format_lines_with_offset() {
         let lines: Vec<&str> = vec!["line"; 50];
         let output = format_lines(&lines, 10, 5);
         assert!(output.contains("10\t"), "应包含偏移起始行号");
@@ -182,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_lines_empty() {
+    fn format_lines_empty() {
         let lines: Vec<&str> = vec![];
         let output = format_lines(&lines, 1, 2000);
         assert!(output.is_empty(), "空文件应返回空字符串");

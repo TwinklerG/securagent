@@ -81,12 +81,7 @@ async fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 /// 提取匹配行及上下文，返回格式化文本。
-fn format_match(
-    filepath: &str,
-    lines: &[&str],
-    match_line_idx: usize,
-    context: usize,
-) -> String {
+fn format_match(filepath: &str, lines: &[&str], match_line_idx: usize, context: usize) -> String {
     let mut output = String::new();
     let line_no = match_line_idx + 1;
 

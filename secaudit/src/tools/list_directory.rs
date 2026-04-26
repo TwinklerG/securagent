@@ -106,11 +106,7 @@ async fn read_sorted_entries(dir: &Path) -> Result<Vec<DirEntry>, Error> {
         let size = if is_dir {
             0
         } else {
-            entry
-                .metadata()
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0)
+            entry.metadata().await.map_or(0, |m| m.len())
         };
 
         entries.push(DirEntry {
@@ -123,11 +119,7 @@ async fn read_sorted_entries(dir: &Path) -> Result<Vec<DirEntry>, Error> {
     }
 
     // 排序：目录优先，同类按名称字母序
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
 
     Ok(entries)
 }
@@ -217,10 +209,7 @@ impl Tool for ListDirectory {
         let resolved = resolve_sandbox_path(&self.work_dir, path_str)?;
 
         if !resolved.is_dir() {
-            return Err(Error::Tool(format!(
-                "路径不是目录：{}",
-                resolved.display()
-            )));
+            return Err(Error::Tool(format!("路径不是目录：{}", resolved.display())));
         }
 
         let recursive = params
@@ -257,7 +246,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_entry_file() {
+    fn format_entry_file() {
         let entry = DirEntry {
             name: "main.rs".into(),
             is_dir: false,
@@ -270,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_entry_dir() {
+    fn format_entry_dir() {
         let entry = DirEntry {
             name: "src/".into(),
             is_dir: true,
@@ -283,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_entry_symlink() {
+    fn format_entry_symlink() {
         let entry = DirEntry {
             name: "link".into(),
             is_dir: false,
@@ -296,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_entry_indented() {
+    fn format_entry_indented() {
         let entry = DirEntry {
             name: "nested.rs".into(),
             is_dir: false,

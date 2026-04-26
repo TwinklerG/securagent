@@ -122,7 +122,7 @@ async fn run_single_file(cli: &Cli, mut config: config::Config, target: &str) {
     let code = match fs::read_to_string(target) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{}: 无法读取文件 {target}: {e}", "错误".red().bold(),);
+            eprintln!("{}: 无法读取文件 {target}: {e}", "错误".red().bold());
             process::exit(1);
         }
     };

@@ -48,13 +48,10 @@ pub fn resolve_sandbox_path(work_dir: &Path, raw: &str) -> Result<PathBuf, Error
 
 /// 异步判断文件是否为二进制文件（前 `BINARY_CHECK_SIZE` 字节中是否含空字节）。
 pub async fn is_binary(path: &Path) -> bool {
-    fs::read(path)
-        .await
-        .map(|bytes| {
-            let check_len = bytes.len().min(BINARY_CHECK_SIZE);
-            bytes
-                .get(..check_len)
-                .is_some_and(|slice| slice.contains(&0))
-        })
-        .unwrap_or(true)
+    fs::read(path).await.map_or(true, |bytes| {
+        let check_len = bytes.len().min(BINARY_CHECK_SIZE);
+        bytes
+            .get(..check_len)
+            .is_some_and(|slice| slice.contains(&0))
+    })
 }

@@ -43,20 +43,18 @@ impl WriteFile {
 
 /// 校验目标路径是否在沙箱工作目录内。
 fn validate_sandbox(target: &Path, work_dir: &Path) -> Result<(), Error> {
-    let parent = target.parent().ok_or_else(|| {
-        Error::Tool(format!("{MSG_OUTSIDE_SANDBOX}：无法获取父目录"))
-    })?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| Error::Tool(format!("{MSG_OUTSIDE_SANDBOX}：无法获取父目录")))?;
 
     // 父目录可能尚不存在，逐级向上查找已存在的祖先目录进行 canonicalize
     let canonical_base = find_existing_ancestor(parent)
         .and_then(|p| p.canonicalize().ok())
-        .ok_or_else(|| {
-            Error::Tool(format!("{MSG_OUTSIDE_SANDBOX}：无法解析路径"))
-        })?;
+        .ok_or_else(|| Error::Tool(format!("{MSG_OUTSIDE_SANDBOX}：无法解析路径")))?;
 
-    let canonical_work = work_dir.canonicalize().map_err(|e| {
-        Error::Tool(format!("无法解析工作目录：{e}"))
-    })?;
+    let canonical_work = work_dir
+        .canonicalize()
+        .map_err(|e| Error::Tool(format!("无法解析工作目录：{e}")))?;
 
     if !canonical_base.starts_with(&canonical_work) {
         return Err(Error::Tool(format!(
@@ -140,16 +138,16 @@ impl Tool for WriteFile {
 
         // 创建父目录
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                Error::Tool(format!("创建目录��败：{e}"))
-            })?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Tool(format!("创建目录失败：{e}")))?;
         }
 
         // 写入文件
         let bytes_written = content.len();
-        fs::write(&target, content).await.map_err(|e| {
-            Error::Tool(format!("写入文件失败：{e}"))
-        })?;
+        fs::write(&target, content)
+            .await
+            .map_err(|e| Error::Tool(format!("写入文件失败：{e}")))?;
 
         Ok(format!(
             "文件已写入：{}（{bytes_written} 字节）",
@@ -163,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_existing_ancestor() {
+    fn find_existing_ancestor_works() {
         // 根目录一定存在
         let ancestor = find_existing_ancestor(Path::new("/tmp/a/b/c"));
         assert!(ancestor.is_some(), "应能找到已存在的祖先目录");

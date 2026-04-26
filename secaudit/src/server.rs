@@ -229,11 +229,7 @@ fn web_confirm(
         });
 
         // 在同步回调中安全等待异步 channel 响应
-        task::block_in_place(|| {
-            Handle::current()
-                .block_on(resp_rx)
-                .unwrap_or(false)
-        })
+        task::block_in_place(|| Handle::current().block_on(resp_rx).unwrap_or(false))
     })
 }
 
@@ -339,19 +335,13 @@ async fn handle_send_message(
     tokio::spawn(async move {
         let mut inst = instance.lock().await;
 
-        let SessionInstance {
-            agent,
-            session,
-            tx,
-        } = &mut *inst;
+        let SessionInstance { agent, session, tx } = &mut *inst;
 
         let tx = tx.clone();
 
         match agent.chat(session, &content).await {
             Ok(response) => {
-                let _ = tx.send(SsePayload::Message {
-                    content: response,
-                });
+                let _ = tx.send(SsePayload::Message { content: response });
             }
             Err(e) => {
                 let _ = tx.send(SsePayload::Error {
@@ -459,9 +449,7 @@ async fn handle_chat(
     // 同步执行 chat
     let chat_result = {
         let mut inst = instance.lock().await;
-        let SessionInstance {
-            agent, session, ..
-        } = &mut *inst;
+        let SessionInstance { agent, session, .. } = &mut *inst;
         agent.chat(session, &req.content).await
     };
 
@@ -470,9 +458,7 @@ async fn handle_chat(
     let mut state_history = Vec::new();
     let mut stream = BroadcastStream::new(rx);
 
-    while let Ok(Some(Ok(payload))) =
-        timeout(Duration::from_millis(10), stream.next()).await
-    {
+    while let Ok(Some(Ok(payload))) = timeout(Duration::from_millis(10), stream.next()).await {
         match payload {
             SsePayload::ToolCall { name, args } => {
                 tool_calls.push(ToolCallRecord {
@@ -502,12 +488,15 @@ async fn handle_chat(
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match chat_result {
-        Ok(message) => Json(serde_json::to_value(ChatResponse {
-            message,
-            tool_calls,
-            state_history,
-            duration_ms,
-        }).unwrap_or_default())
+        Ok(message) => Json(
+            serde_json::to_value(ChatResponse {
+                message,
+                tool_calls,
+                state_history,
+                duration_ms,
+            })
+            .unwrap_or_default(),
+        )
         .into_response(),
         Err(e) => Json(serde_json::json!({
             "error": e.to_string(),
@@ -520,10 +509,7 @@ async fn handle_chat(
 /// `GET /api/sessions/:id/history` — 获取会话完整历史
 ///
 /// 返回对话消息和工具调用统计，便于调试和评估。
-async fn handle_history(
-    State(state): State<AppState>,
-    Path(id): Path<u64>,
-) -> impl IntoResponse {
+async fn handle_history(State(state): State<AppState>, Path(id): Path<u64>) -> impl IntoResponse {
     let sessions = state.sessions.lock().await;
     let Some(instance) = sessions.get(&id).cloned() else {
         return Json(serde_json::json!({ "error": "会话不存在" })).into_response();

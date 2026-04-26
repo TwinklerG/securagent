@@ -264,7 +264,8 @@ impl Agent {
         let mut empty_rounds = 0u32;
         let mut final_text = String::new();
 
-        self.events.set_state(AgentState::Executing { iteration: 0 });
+        self.events
+            .set_state(AgentState::Executing { iteration: 0 });
 
         loop {
             if iteration >= max_iter {

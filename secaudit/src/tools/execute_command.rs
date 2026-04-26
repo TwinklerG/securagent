@@ -106,9 +106,7 @@ fn extract_command_prefix(command: &str) -> (&str, Option<&str>) {
     let first = parts.next().unwrap_or_default();
     let two_word = parts.next().map(|second| {
         // 计算双词前缀在原字符串中的结束位置
-        let first_end = trimmed
-            .find(first)
-            .map_or(0, |pos| pos + first.len());
+        let first_end = trimmed.find(first).map_or(0, |pos| pos + first.len());
         let second_start = trimmed
             .get(first_end..)
             .and_then(|s| s.find(second))
@@ -123,7 +121,9 @@ fn extract_command_prefix(command: &str) -> (&str, Option<&str>) {
 /// 检查命令是否命中黑名单。
 fn is_blocked(command: &str) -> bool {
     let trimmed = command.trim();
-    BLOCKED_COMMANDS.iter().any(|blocked| trimmed.contains(blocked))
+    BLOCKED_COMMANDS
+        .iter()
+        .any(|blocked| trimmed.contains(blocked))
 }
 
 /// 检查命令是否在安全白名单中。
@@ -247,7 +247,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_safe_commands() {
+    fn safe_commands() {
         assert!(is_safe("ls -la"));
         assert!(is_safe("git log --oneline"));
         assert!(is_safe("cargo clippy -- -D warnings"));
@@ -257,14 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unsafe_commands() {
+    fn unsafe_commands() {
         assert!(!is_safe("curl http://example.com"));
         assert!(!is_safe("wget something"));
         assert!(!is_safe("sudo rm -rf /"));
     }
 
     #[test]
-    fn test_blocked_commands() {
+    fn blocked_commands() {
         assert!(is_blocked("rm -rf /"));
         assert!(is_blocked("sudo mkfs.ext4 /dev/sda"));
         assert!(is_blocked("shutdown -h now"));
@@ -272,11 +272,11 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_output() {
+    fn truncate_output_works() {
         let short = "hello";
         assert_eq!(truncate_output(short), "hello");
 
-        let long: String = "x".repeat(MAX_OUTPUT_LEN + 100);
+        let long = "x".repeat(MAX_OUTPUT_LEN + 100);
         let result = truncate_output(&long);
         assert!(result.len() < long.len() + MSG_TRUNCATED.len());
         assert!(result.ends_with(MSG_TRUNCATED));
