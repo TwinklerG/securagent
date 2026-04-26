@@ -27,7 +27,7 @@ fmt:
 
 # 格式化检查（不修改）
 fmt-check:
-    cargo fmt --all -- --check
+    cargo fmt --all --check
 
 # 质量检查（格式 + Clippy）
 check: fmt-check clippy
