@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use secaudit_agent::{Agent, ChatMessage, Session};
+use secaudit_agent::{Agent, ChatMessage, Session, TokenUsage};
 use serde::Serialize;
 
 /// 工具调用记录。
@@ -194,6 +194,13 @@ pub struct SessionSnapshot {
     pub messages: Vec<ChatMessage>,
 }
 
+/// 会话运行统计。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionMetrics {
+    /// 聚合 token 用量（基于 assistant 消息 usage 汇总）。
+    pub token_usage: TokenUsage,
+}
+
 impl SessionSnapshot {
     /// 从 Session 生成快照。
     #[must_use]
@@ -204,6 +211,20 @@ impl SessionSnapshot {
             messages: session.messages().to_vec(),
         }
     }
+}
+
+/// 从会话消息聚合 token 用量。
+#[must_use]
+pub fn collect_session_metrics(messages: &[ChatMessage]) -> SessionMetrics {
+    let token_usage = messages.iter().filter_map(|message| message.usage).fold(
+        TokenUsage::default(),
+        |mut acc, usage| {
+            acc.add_assign(&usage);
+            acc
+        },
+    );
+
+    SessionMetrics { token_usage }
 }
 
 /// 非交互模式输出。
@@ -220,6 +241,8 @@ pub enum HeadlessResponse {
         trace: TraceSnapshot,
         /// 会话快照。
         session: SessionSnapshot,
+        /// 会话统计。
+        metrics: SessionMetrics,
         /// 总耗时（毫秒）。
         duration_ms: u64,
         /// 工作目录。
@@ -237,6 +260,8 @@ pub enum HeadlessResponse {
         trace: TraceSnapshot,
         /// 会话快照。
         session: SessionSnapshot,
+        /// 会话统计。
+        metrics: SessionMetrics,
         /// 总耗时（毫秒）。
         duration_ms: u64,
         /// 工作目录。
@@ -246,23 +271,44 @@ pub enum HeadlessResponse {
     },
 }
 
+/// 非交互响应的公共上下文。
+#[derive(Debug)]
+pub struct HeadlessResponseContext {
+    /// 用户输入与输出轮次。
+    pub turns: Vec<TurnRecord>,
+    /// 轨迹信息（状态、思考、工具、确认）。
+    pub trace: TraceSnapshot,
+    /// 会话快照。
+    pub session: SessionSnapshot,
+    /// 会话统计。
+    pub metrics: SessionMetrics,
+    /// 总耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 工作目录。
+    pub work_dir: String,
+    /// 确认模式。
+    pub confirm_mode: String,
+}
+
 impl HeadlessResponse {
     /// 构造成功响应。
     #[must_use]
-    pub fn success(
-        final_message: String,
-        turns: Vec<TurnRecord>,
-        trace: TraceSnapshot,
-        session: SessionSnapshot,
-        duration_ms: u64,
-        work_dir: String,
-        confirm_mode: String,
-    ) -> Self {
+    pub fn success(final_message: String, context: HeadlessResponseContext) -> Self {
+        let HeadlessResponseContext {
+            turns,
+            trace,
+            session,
+            metrics,
+            duration_ms,
+            work_dir,
+            confirm_mode,
+        } = context;
         Self::Success {
             final_message,
             turns,
             trace,
             session,
+            metrics,
             duration_ms,
             work_dir,
             confirm_mode,
@@ -271,20 +317,22 @@ impl HeadlessResponse {
 
     /// 构造失败响应。
     #[must_use]
-    pub fn error(
-        error: String,
-        turns: Vec<TurnRecord>,
-        trace: TraceSnapshot,
-        session: SessionSnapshot,
-        duration_ms: u64,
-        work_dir: String,
-        confirm_mode: String,
-    ) -> Self {
+    pub fn error(error: String, context: HeadlessResponseContext) -> Self {
+        let HeadlessResponseContext {
+            turns,
+            trace,
+            session,
+            metrics,
+            duration_ms,
+            work_dir,
+            confirm_mode,
+        } = context;
         Self::Error {
             error,
             turns,
             trace,
             session,
+            metrics,
             duration_ms,
             work_dir,
             confirm_mode,
@@ -295,8 +343,10 @@ impl HeadlessResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        HeadlessResponse, SessionSnapshot, ToolCallRecord, TraceRecorder, TraceSnapshot, TurnRecord,
+        HeadlessResponse, HeadlessResponseContext, SessionMetrics, SessionSnapshot, ToolCallRecord,
+        TraceRecorder, TraceSnapshot, TurnRecord,
     };
+    use secaudit_agent::TokenUsage;
 
     #[test]
     fn recorder_tracks_state_and_tool_trace() {
@@ -331,25 +381,30 @@ mod tests {
     fn response_serialization_contains_status_tag() {
         let response = HeadlessResponse::success(
             "done".to_owned(),
-            vec![TurnRecord::success(1, "hi".to_owned(), "ok".to_owned(), 10)],
-            TraceSnapshot {
-                tool_calls: vec![ToolCallRecord {
-                    name: "list_directory".to_owned(),
-                    args: "{}".to_owned(),
-                    result: "[]".to_owned(),
-                }],
-                state_history: vec!["规划".to_owned()],
-                think_events: vec!["思考".to_owned()],
-                confirm_events: Vec::new(),
+            HeadlessResponseContext {
+                turns: vec![TurnRecord::success(1, "hi".to_owned(), "ok".to_owned(), 10)],
+                trace: TraceSnapshot {
+                    tool_calls: vec![ToolCallRecord {
+                        name: "list_directory".to_owned(),
+                        args: "{}".to_owned(),
+                        result: "[]".to_owned(),
+                    }],
+                    state_history: vec!["规划".to_owned()],
+                    think_events: vec!["思考".to_owned()],
+                    confirm_events: Vec::new(),
+                },
+                session: SessionSnapshot {
+                    id: "session-id".to_owned(),
+                    created_at: "2026-04-26T00:00:00Z".to_owned(),
+                    messages: Vec::new(),
+                },
+                metrics: SessionMetrics {
+                    token_usage: TokenUsage::default(),
+                },
+                duration_ms: 10,
+                work_dir: "/tmp/project".to_owned(),
+                confirm_mode: "deny".to_owned(),
             },
-            SessionSnapshot {
-                id: "session-id".to_owned(),
-                created_at: "2026-04-26T00:00:00Z".to_owned(),
-                messages: Vec::new(),
-            },
-            10,
-            "/tmp/project".to_owned(),
-            "deny".to_owned(),
         );
 
         let json = serde_json::to_value(response);

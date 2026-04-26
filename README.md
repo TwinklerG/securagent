@@ -89,7 +89,10 @@ just run-chat --message "审计当前目录" --output-format text
 - `turns`：每轮用户输入、助手输出、错误与耗时
 - `trace`：`state_history`、`think_events`、`tool_calls`、`confirm_events`
 - `session`：`id`、`created_at`、`messages`（可直接用于评估）
+- `metrics`：`token_usage`（`prompt_tokens`、`completion_tokens`、`total_tokens`）
 - `duration_ms`、`work_dir`、`confirm_mode`
+
+评估输入契约文档见：`docs/contracts/agent-evaluation-contract.md`
 
 ## 工具集
 

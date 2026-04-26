@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::agent::Finding;
-use crate::llm::{ChatMessage, Role};
+use crate::llm::{ChatMessage, Role, TokenUsage};
 
 /// 未知工具名称的默认值
 const UNKNOWN_TOOL_NAME: &str = "unknown";
@@ -92,6 +92,16 @@ pub struct MultiTurnSample {
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
+fn collect_token_usage(messages: &[ChatMessage]) -> TokenUsage {
+    messages.iter().filter_map(|message| message.usage).fold(
+        TokenUsage::default(),
+        |mut acc, usage| {
+            acc.add_assign(&usage);
+            acc
+        },
+    )
+}
+
 /// 将审计对话历史与发现转换为多轮评估样本。
 #[must_use]
 pub fn to_multi_turn_sample(
@@ -107,12 +117,27 @@ pub fn to_multi_turn_sample(
 
     // reference 字段序列化 findings 供评估指标使用
     let reference = serde_json::to_string(findings).unwrap_or_default();
+    let token_usage = collect_token_usage(messages);
+    let metadata = if token_usage.is_zero() {
+        None
+    } else {
+        let mut map = HashMap::new();
+        map.insert(
+            "token_usage".to_owned(),
+            serde_json::json!({
+                "prompt_tokens": token_usage.prompt_tokens,
+                "completion_tokens": token_usage.completion_tokens,
+                "total_tokens": token_usage.total_tokens,
+            }),
+        );
+        Some(map)
+    };
 
     MultiTurnSample {
         user_input: sample_messages,
         reference: Some(reference),
         reference_tool_calls: None,
-        metadata: None,
+        metadata,
     }
 }
 

@@ -23,7 +23,10 @@ use secaudit_agent::strategy;
 use secaudit_agent::{Agent, Session, to_multi_turn_sample};
 use secaudit_core::Config;
 
-use crate::headless::{HeadlessResponse, SessionSnapshot, TraceRecorder, TurnRecord};
+use crate::headless::{
+    HeadlessResponse, HeadlessResponseContext, SessionSnapshot, TraceRecorder, TurnRecord,
+    collect_session_metrics,
+};
 
 /// secaudit -- 安全代码审计 LLM Agent
 #[derive(Parser)]
@@ -298,27 +301,22 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
     let duration_ms = start.elapsed().as_millis() as u64;
     let trace = recorder.snapshot();
     let session_snapshot = SessionSnapshot::from_session(&session);
+    let metrics = collect_session_metrics(&session_snapshot.messages);
+
+    let context = HeadlessResponseContext {
+        turns,
+        trace,
+        session: session_snapshot,
+        metrics,
+        duration_ms,
+        work_dir: work_dir_display,
+        confirm_mode: confirm_mode_name,
+    };
 
     let response = if let Some(error) = &failure {
-        HeadlessResponse::error(
-            error.clone(),
-            turns,
-            trace,
-            session_snapshot,
-            duration_ms,
-            work_dir_display,
-            confirm_mode_name,
-        )
+        HeadlessResponse::error(error.clone(), context)
     } else {
-        HeadlessResponse::success(
-            final_message,
-            turns,
-            trace,
-            session_snapshot,
-            duration_ms,
-            work_dir_display,
-            confirm_mode_name,
-        )
+        HeadlessResponse::success(final_message, context)
     };
 
     print_headless_response(cli.output_format, &response);

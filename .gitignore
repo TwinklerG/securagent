@@ -4,3 +4,7 @@ datasets/
 __pycache__
 AGENTS.md
 CLAUDE.md
+.claude
+.codex
+outputs
+demo-projects
