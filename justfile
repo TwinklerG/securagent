@@ -40,6 +40,10 @@ run *ARGS:
 run-chat *ARGS:
     cargo run -p secaudit -- --mode chat {{ARGS}}
 
+# 运行批量评估（默认 demo manifest，react+reflexion）
+eval-batch *ARGS:
+    python3 scripts/run_eval_batch.py {{ARGS}}
+
 # 清理构建产物
 clean:
     cargo clean

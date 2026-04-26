@@ -94,6 +94,27 @@ just run-chat --message "审计当前目录" --output-format text
 
 评估输入契约文档见：`docs/contracts/agent-evaluation-contract.md`
 
+### 批量评估（演示样本）
+
+仓库内置演示样本清单：`demo-projects/eval_manifest.json`
+
+```bash
+# 查看执行计划（不实际运行）
+just eval-batch --dry-run
+
+# 小规模实跑示例（仅 Python 样本）
+just eval-batch --strategies react --runs 1 --case-filter python --continue-on-error
+
+# 项目级评估示例（chat 模式，审计整个仓库）
+just eval-batch --strategies react --runs 1 --case-filter project-securagent-root-chat --continue-on-error
+```
+
+输出目录：`outputs/eval-batch/`
+
+- `summary.json`：策略级汇总指标
+- `case-metrics.jsonl`：逐样本指标明细
+- `platform-import.jsonl`：评估平台导入友好格式
+
 ## 工具集
 
 Agent 根据运行模式加载不同工具集：
