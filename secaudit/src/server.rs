@@ -12,6 +12,9 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use secaudit_agent::tools::ConfirmFn;
+use secaudit_agent::{Agent, ChatMessage, Role, Session};
+use secaudit_core::Config;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::runtime::Handle;
@@ -22,12 +25,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
 
-use crate::agent::Agent;
-use crate::config::Config;
-use crate::llm::{ChatMessage, Role};
 use crate::output::truncate_with_ellipsis;
-use crate::session::Session;
-use crate::tools::ConfirmFn;
 
 // ─── SSE 事件名称常量 ────────────────────────────────────────────────────────
 

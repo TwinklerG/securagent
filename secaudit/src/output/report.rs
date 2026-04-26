@@ -2,8 +2,8 @@
 
 use std::fmt::Write;
 
-use crate::agent::AuditReport;
-use crate::error::Error;
+use secaudit_agent::AuditReport;
+use secaudit_core::Error;
 
 /// 将审计报告序列化为 JSON
 ///

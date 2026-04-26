@@ -1,0 +1,12 @@
+[package]
+name = "secaudit-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+secaudit-llm = { path = "../secaudit-llm" }
+
+[lints]
+workspace = true

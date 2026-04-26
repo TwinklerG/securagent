@@ -77,8 +77,15 @@ struct SemgrepPosition {
 pub struct SemgrepScanner;
 
 impl SemgrepScanner {
+    #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+}
+
+impl Default for SemgrepScanner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -93,6 +93,7 @@ pub struct MultiTurnSample {
 }
 
 /// 将审计对话历史与发现转换为多轮评估样本。
+#[must_use]
 pub fn to_multi_turn_sample(
     messages: &[ChatMessage],
     findings: &[Finding],

@@ -1161,16 +1161,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
-name = "llm-common"
-version = "0.1.0"
-dependencies = [
- "async-openai",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1837,26 +1827,67 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "secaudit"
 version = "0.1.0"
 dependencies = [
- "async-openai",
- "async-trait",
  "axum",
- "chrono",
  "clap",
  "colored",
- "glob",
- "llm-common",
- "regex",
- "reqwest 0.13.2",
  "rustyline",
+ "secaudit-agent",
+ "secaudit-core",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "secaudit-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "secaudit-core",
+ "secaudit-llm",
+ "secaudit-tools",
+ "serde",
+ "serde_json",
+ "tracing",
  "uuid",
+]
+
+[[package]]
+name = "secaudit-core"
+version = "0.1.0"
+dependencies = [
+ "secaudit-llm",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "secaudit-llm"
+version = "0.1.0"
+dependencies = [
+ "async-openai",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "secaudit-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "glob",
+ "regex",
+ "reqwest 0.13.2",
+ "secaudit-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

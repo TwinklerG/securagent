@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["secaudit", "crates/llm-common"]
+members = [
+    "secaudit",
+    "crates/secaudit-core",
+    "crates/secaudit-llm",
+    "crates/secaudit-tools",
+    "crates/secaudit-agent",
+]
 
 [workspace.dependencies]
 async-openai = { version = "0.34", features = ["chat-completion"] }

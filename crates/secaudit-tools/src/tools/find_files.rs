@@ -29,6 +29,7 @@ pub struct FindFiles {
 
 impl FindFiles {
     /// 创建实例，`work_dir` 为沙箱根目录。
+    #[must_use]
     pub fn new(work_dir: PathBuf) -> Self {
         Self { work_dir }
     }

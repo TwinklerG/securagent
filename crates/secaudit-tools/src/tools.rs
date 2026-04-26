@@ -69,6 +69,7 @@ pub fn default_tools(work_dir: PathBuf, confirm: ConfirmFn) -> Vec<Box<dyn Tool>
 ///
 /// 单文件审计时代码已内联在 prompt 中，不需要文件操作和命令执行工具。
 /// 限制工具集可避免 LLM 写入无关文件、安装软件等浪费行为。
+#[must_use]
 pub fn audit_tools() -> Vec<Box<dyn Tool>> {
     security_audit_tools()
 }

@@ -1,4 +1,4 @@
-//! **llm-common** — 通用 LLM 客户端与对话类型，供 workspace 内多个 crate 复用。
+//! **secaudit-llm** — 通用 LLM 客户端与对话类型，供 workspace 内多个 crate 复用。
 //!
 //! 基于 `async-openai` 封装，兼容 `OpenAI` Chat Completions API。
 //! 提供两种调用模式：
@@ -15,7 +15,7 @@ use async_openai::types::chat::{
 };
 use serde::{Deserialize, Serialize};
 
-/// llm-common 错误类型。
+/// secaudit-llm 错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// LLM 调用相关错误（网络、API 响应异常等）

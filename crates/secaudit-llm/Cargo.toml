@@ -1,5 +1,5 @@
 [package]
-name = "llm-common"
+name = "secaudit-llm"
 version = "0.1.0"
 edition = "2024"
 

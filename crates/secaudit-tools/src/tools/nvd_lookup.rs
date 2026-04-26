@@ -103,12 +103,19 @@ pub struct NvdLookup {
 
 impl NvdLookup {
     /// 创建实例。
+    #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
+    }
+}
+
+impl Default for NvdLookup {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

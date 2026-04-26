@@ -3,10 +3,10 @@
 use std::iter::repeat_n;
 
 use colored::Colorize;
+use secaudit_agent::AuditReport;
+use secaudit_agent::state::AgentState;
 
 use super::truncate_with_ellipsis;
-use crate::agent::AuditReport;
-use crate::agent::state::AgentState;
 
 /// 分隔线长度
 const SEPARATOR_LEN: usize = 60;

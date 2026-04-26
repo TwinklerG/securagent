@@ -6,30 +6,18 @@
 
 ```
 securagent/
-├── secaudit/              # Agent 主程序
-│   ├── src/agent/         # Agent 核心：状态机、执行器、推理策略
-│   │   ├── state.rs       #   状态枚举与流转
-│   │   ├── executor.rs    #   ReAct 单步执行器
-│   │   └── strategy/      #   推理策略（react / reflexion）
-│   ├── src/tools/         # 工具集
-│   │   ├── shared.rs      #   共享模块（沙箱路径校验、二进制检测）
-│   │   ├── read_file.rs   #   文件读取（带行号）
-│   │   ├── list_directory.rs   # 目录列表
-│   │   ├── search_content.rs   # 正则内容搜索（异步 IO）
-│   │   ├── find_files.rs       # glob 文件查找
-│   │   ├── write_file.rs       # 文件写入（需确认）
-│   │   ├── execute_command.rs  # 命令执行（需确认 + 黑名单）
-│   │   ├── semgrep_scanner.rs  # Semgrep 静态分析
-│   │   ├── dependency_checker.rs  # 依赖漏洞审计
-│   │   └── nvd_lookup.rs      # NVD CVE 查询
-│   ├── src/llm.rs         # LLM 模块（重导出 llm-common 统一类型）
-│   ├── src/server.rs      # Web 会话 API 服务器（Axum + SSE）
-│   ├── src/session.rs     # 会话管理（UUID + 序列化）
-│   ├── src/config.rs      # 应用配置（环境变量 + Default）
-│   ├── src/prompt.rs      # Prompt 模板
-│   └── src/trajectory.rs  # 对话 → Ragas 风格样本转换
-└── crates/llm-common/     # 通用 LLM 客户端与对话类型
-                           #   供 secaudit 共用
+├── secaudit/                  # 应用入口（CLI / Web / 输出渲染）
+│   └── src/
+│       ├── main.rs            # 命令行入口与运行模式分发
+│       ├── interactive.rs     # 交互式 REPL
+│       ├── server.rs          # Web 会话 API（Axum + SSE）
+│       └── output/            # CLI/JSON/Markdown 输出
+└── crates/
+    ├── secaudit-core/         # 共享核心类型（Config / Error）
+    ├── secaudit-llm/          # 通用 LLM 客户端与对话类型
+    ├── secaudit-tools/        # 工具系统（Tool trait + 内置工具）
+    │   └── src/tools/         # read/list/search/find/write/exec/semgrep/deps/nvd
+    └── secaudit-agent/        # 推理引擎（ReAct/Reflexion + Session + Prompt + Trajectory）
 ```
 
 ## 快速开始
@@ -127,7 +115,7 @@ Agent 根据运行模式加载不同工具集：
 
 **单文件审计模式**（3 个只读工具）：`semgrep_scanner`、`dependency_checker`、`nvd_lookup`
 
-所有文件操作工具共享沙箱路径校验逻辑（`tools/shared.rs`），确保路径不逃逸出工作目录。
+所有文件操作工具共享沙箱路径校验逻辑（`crates/secaudit-tools/src/tools/shared.rs`），确保路径不逃逸出工作目录。
 
 ## 推理策略
 
@@ -136,14 +124,14 @@ Agent 根据运行模式加载不同工具集：
 
 ## LLM 客户端架构
 
-统一的 LLM 类型和客户端定义在 `crates/llm-common` 中：
+统一的 LLM 类型和客户端定义在 `crates/secaudit-llm` 中：
 
 - **`HttpLlmClient`**：基于 `async-openai`，支持两种调用模式
   - `generate(prompt)` — 单轮文本生成
   - `chat(messages, tools)` — 多轮对话 + 工具调用（Agent 交互）
 - **核心类型**：`ChatMessage`、`Role`、`ToolCallResponse`、`FunctionCall`、`ToolDefinition`
 
-`secaudit/src/llm.rs` 为薄重导出层，提供 `create_client(config)` 工厂函数。
+`crates/secaudit-agent/src/llm.rs` 为薄重导出层，提供 `create_client(config)` 工厂函数。
 
 ## 构建与测试
 

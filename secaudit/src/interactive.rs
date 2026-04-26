@@ -7,11 +7,10 @@ use std::sync::Arc;
 use colored::Colorize;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use secaudit_agent::{Agent, Session};
+use secaudit_core::Config;
 
-use crate::agent::Agent;
-use crate::config::Config;
 use crate::output;
-use crate::session::Session;
 
 /// REPL 提示符
 const PROMPT: &str = "secaudit> ";

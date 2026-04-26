@@ -4,26 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-llm-common = { path = "../crates/llm-common" }
-async-openai.workspace = true
-async-trait.workspace = true
+secaudit-agent = { path = "../crates/secaudit-agent" }
+secaudit-core = { path = "../crates/secaudit-core" }
 axum = "0.8"
-chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
-glob = "0.3"
-regex = "1"
-reqwest.workspace = true
 rustyline = "15"
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true

@@ -83,7 +83,6 @@ impl Config {
     /// # Errors
     ///
     /// 文件不存在或解析失败时返回错误。
-    #[expect(dead_code, reason = "迭代三预留接口")]
     pub fn from_file(_path: &Path) -> Result<Self, Error> {
         // TODO: 迭代三实现 TOML/JSON 配置文件解析
         Err(Error::Config("配置文件加载尚未实现".into()))

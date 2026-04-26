@@ -15,16 +15,16 @@ use crate::error::Error;
 
 /// 策略执行结果。
 #[derive(Debug)]
-pub struct StrategyResult {
+pub(crate) struct StrategyResult {
     /// 实际使用的迭代轮次
-    pub iterations_used: u32,
+    pub(crate) iterations_used: u32,
 }
 
 /// 推理策略接口。
 ///
 /// 策略负责执行审计的核心推理循环，返回执行结果（含迭代轮次）。
 #[async_trait::async_trait]
-pub trait Strategy: Send {
+pub(crate) trait Strategy: Send {
     /// 执行推理循环。
     ///
     /// 参数中的 executor 已包含系统 prompt 和规划结果。
@@ -54,7 +54,7 @@ pub const STRATEGY_REFLEXION: &str = "reflexion";
 impl StrategyKind {
     /// 创建对应的策略实例。
     #[must_use]
-    pub fn build(self) -> Box<dyn Strategy> {
+    pub(crate) fn build(self) -> Box<dyn Strategy> {
         match self {
             Self::React => Box::new(ReactStrategy),
             Self::Reflexion => Box::new(ReflexionStrategy::new()),

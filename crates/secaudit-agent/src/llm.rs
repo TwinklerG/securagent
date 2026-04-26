@@ -1,6 +1,6 @@
-// LLM 模块：重导出 llm-common 统一类型，提供 secaudit 专用的客户端构造
+// LLM 模块：重导出 secaudit-llm 统一类型，提供 secaudit 专用的客户端构造
 
-pub use llm_common::{
+pub use secaudit_llm::{
     ChatMessage, HttpLlmClient, LlmConfig, Role, ToolCallResponse, ToolDefinition,
 };
 

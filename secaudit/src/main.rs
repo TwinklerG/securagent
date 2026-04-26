@@ -4,17 +4,9 @@
     reason = "CLI 模式需要直接输出到终端"
 )]
 
-mod agent;
-mod config;
-mod error;
 mod interactive;
-mod llm;
 mod output;
-mod prompt;
 mod server;
-mod session;
-mod tools;
-mod trajectory;
 
 use std::env;
 use std::fs;
@@ -24,8 +16,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use colored::Colorize;
-
-use agent::strategy;
+use secaudit_agent::strategy;
+use secaudit_agent::{Agent, to_multi_turn_sample};
+use secaudit_core::Config;
 
 /// secaudit -- 安全代码审计 LLM Agent
 #[derive(Parser)]
@@ -93,7 +86,7 @@ async fn main() {
     let cli = Cli::parse();
 
     // 加载配置
-    let config = match config::Config::from_env() {
+    let config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{}: {e}", "配置错误".red().bold());
@@ -111,13 +104,13 @@ async fn main() {
 }
 
 /// 交互模式：进入 REPL 循环
-async fn run_interactive(config: config::Config) {
+async fn run_interactive(config: Config) {
     let work_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     interactive::run(config, work_dir).await;
 }
 
 /// 单文件审计模式
-async fn run_single_file(cli: &Cli, mut config: config::Config, target: &str) {
+async fn run_single_file(cli: &Cli, mut config: Config, target: &str) {
     // 读取源码文件
     let code = match fs::read_to_string(target) {
         Ok(c) => c,
@@ -143,7 +136,7 @@ async fn run_single_file(cli: &Cli, mut config: config::Config, target: &str) {
     // 创建 Agent 并设置回调
     config.reasoning_strategy.clone_from(&cli.strategy);
     let work_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut agent = agent::Agent::new(config, work_dir, Arc::new(|_| true));
+    let mut agent = Agent::new(config, work_dir, Arc::new(|_| true));
     agent.on_state_change(output::cli::print_state);
     agent.on_think(output::cli::print_thinking);
     agent.on_tool_call(output::cli::print_tool_call);
@@ -171,8 +164,7 @@ async fn run_single_file(cli: &Cli, mut config: config::Config, target: &str) {
 
             // 导出 trajectory JSON
             if let Some(output_path) = &cli.output {
-                let sample =
-                    trajectory::to_multi_turn_sample(&report.messages, &report.findings, target);
+                let sample = to_multi_turn_sample(&report.messages, &report.findings, target);
                 match serde_json::to_string_pretty(&sample) {
                     Ok(json) => {
                         if let Err(e) = fs::write(output_path, json) {

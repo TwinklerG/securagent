@@ -43,6 +43,12 @@ impl ReflexionStrategy {
     }
 }
 
+impl Default for ReflexionStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Strategy for ReflexionStrategy {
     async fn run(
