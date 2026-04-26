@@ -24,8 +24,8 @@ pub enum Error {
     Io(#[from] io::Error),
 }
 
-impl From<ragrs::Error> for Error {
-    fn from(e: ragrs::Error) -> Self {
+impl From<llm_common::Error> for Error {
+    fn from(e: llm_common::Error) -> Self {
         Self::Llm(e.to_string())
     }
 }

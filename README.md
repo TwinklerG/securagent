@@ -27,11 +27,9 @@ securagent/
 │   ├── src/session.rs     # 会话管理（UUID + 序列化）
 │   ├── src/config.rs      # 应用配置（环境变量 + Default）
 │   ├── src/prompt.rs      # Prompt 模板
-│   └── src/trajectory.rs  # 对话 → MultiTurnSample 转换
-├── ragrs/                 # Rust 版 Ragas 评估框架
-├── ragrs-bridge/          # CLI 桥接器（stdin JSON → ragrs 评分）
+│   └── src/trajectory.rs  # 对话 → Ragas 风格样本转换
 └── crates/llm-common/     # 通用 LLM 客户端与对话类型
-                           #   供 secaudit 和 ragrs-bridge 共用
+                           #   供 secaudit 共用
 ```
 
 ## 快速开始
@@ -141,7 +139,7 @@ Agent 根据运行模式加载不同工具集：
 统一的 LLM 类型和客户端定义在 `crates/llm-common` 中：
 
 - **`HttpLlmClient`**：基于 `async-openai`，支持两种调用模式
-  - `generate(prompt)` — 单轮文本生成（ragrs LLM-as-Judge 评估）
+  - `generate(prompt)` — 单轮文本生成
   - `chat(messages, tools)` — 多轮对话 + 工具调用（Agent 交互）
 - **核心类型**：`ChatMessage`、`Role`、`ToolCallResponse`、`FunctionCall`、`ToolDefinition`
 
@@ -154,6 +152,17 @@ just build       # Release 构建
 just check       # Clippy + 格式检查
 just test        # 运行测试
 ```
+
+## CI/CD（GitLab）
+
+项目已提供 `.gitlab-ci.yml`，默认在 **Push / Merge Request / Tag** 触发流水线：
+
+- `quality`：代码质量检查
+- `test`：运行测试
+- `build`：Release 构建并产出二进制 artifacts（`secaudit`）
+- `release`：仅在 Tag 触发，打包 `securagent-<tag>.tar.gz` 作为发布产物
+
+其中质量检查与 `just check` 保持一致（参考 `justfile`）。
 
 ## 数据集准备（scripts）
 

@@ -12,7 +12,7 @@
   ]
 }
 
-后端在评测执行时会自动把该记录适配为 ragrs 可处理的 MultiTurnSample。
+后端在评测执行时会自动把该记录适配为 ragas 可处理的 MultiTurnSample。
 
 用法示例：
   uv run import_prepared_dataset.py \

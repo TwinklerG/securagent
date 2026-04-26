@@ -2,7 +2,7 @@
 //!
 //! 基于 `async-openai` 封装，兼容 `OpenAI` Chat Completions API。
 //! 提供两种调用模式：
-//! - `generate`：简单单轮文本生成（ragrs `LlmClient` trait 实现）
+//! - `generate`：简单单轮文本生成
 //! - `chat`：多轮对话 + 工具调用（secaudit Agent 使用）
 
 use async_openai::config::OpenAIConfig;
@@ -13,9 +13,15 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionTools,
     CreateChatCompletionRequestArgs, FunctionCall as OpenAIFunctionCall, FunctionObjectArgs,
 };
-use async_trait::async_trait;
-use ragrs::{Error, LlmClient};
 use serde::{Deserialize, Serialize};
+
+/// llm-common 错误类型。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// LLM 调用相关错误（网络、API 响应异常等）
+    #[error("LLM 错误：{0}")]
+    Llm(String),
+}
 
 // ── 配置 ─────────────────────────────────────────────────────────────────────
 
@@ -235,7 +241,7 @@ fn from_tool_calls(calls: &[ChatCompletionMessageToolCalls]) -> Vec<ToolCallResp
 /// 基于 `async-openai` 的 LLM 客户端。
 ///
 /// 同时支持：
-/// - ragrs `LlmClient` trait（`generate`，用于评估指标 LLM-as-Judge）
+/// - `generate`（单轮文本生成）
 /// - 多轮对话 + 工具调用（`chat`，用于 Agent 交互）
 pub struct HttpLlmClient {
     /// async-openai 客户端
@@ -323,11 +329,13 @@ impl HttpLlmClient {
             tool_call_id: None,
         })
     }
-}
 
-#[async_trait]
-impl LlmClient for HttpLlmClient {
-    async fn generate(&self, prompt: &str) -> Result<String, Error> {
+    /// 发送单轮生成请求，返回模型输出文本。
+    ///
+    /// # Errors
+    ///
+    /// 请求构建、API 调用或响应解析失败时返回 [`Error::Llm`]。
+    pub async fn generate(&self, prompt: &str) -> Result<String, Error> {
         let message = ChatCompletionRequestUserMessageArgs::default()
             .content(prompt)
             .build()

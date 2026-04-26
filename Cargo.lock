@@ -1165,10 +1165,9 @@ name = "llm-common"
 version = "0.1.0"
 dependencies = [
  "async-openai",
- "async-trait",
- "ragrs",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1470,32 +1469,6 @@ checksum = "c069c179fcdc6a2fe24d8d18305cf085fdbd4f922c041943e203685d6a1c58fd"
 dependencies = [
  "endian-type",
  "nibble_vec",
-]
-
-[[package]]
-name = "ragrs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "ragrs-bridge"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "clap",
- "llm-common",
- "ragrs",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -1872,7 +1845,6 @@ dependencies = [
  "colored",
  "glob",
  "llm-common",
- "ragrs",
  "regex",
  "reqwest 0.13.2",
  "rustyline",

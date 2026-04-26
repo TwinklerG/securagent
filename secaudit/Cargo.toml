@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ragrs = { path = "../ragrs" }
 llm-common = { path = "../crates/llm-common" }
 async-openai.workspace = true
 async-trait.workspace = true

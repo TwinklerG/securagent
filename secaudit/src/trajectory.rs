@@ -1,8 +1,8 @@
-// Trajectory 模块：将审计对话历史转换为 ragrs 评估样本
+// Trajectory 模块：将审计对话历史转换为评估平台可消费的多轮样本
 
 use std::collections::HashMap;
 
-use ragrs::{Message, MultiTurnSample, ToolCall};
+use serde::Serialize;
 
 use crate::agent::Finding;
 use crate::llm::{ChatMessage, Role};
@@ -10,13 +10,95 @@ use crate::llm::{ChatMessage, Role};
 /// 未知工具名称的默认值
 const UNKNOWN_TOOL_NAME: &str = "unknown";
 
-/// 将审计对话历史与发现转换为 ragrs 多轮评估样本。
+/// 轨迹中的工具调用信息。
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCall {
+    /// 工具名称
+    pub name: String,
+    /// 工具参数
+    #[serde(default)]
+    pub arguments: HashMap<String, serde_json::Value>,
+}
+
+/// 轨迹中的对话消息。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum Message {
+    /// 系统消息
+    System { content: String },
+    /// 用户消息
+    Human { content: String },
+    /// 助手消息，可附带工具调用
+    Ai {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ToolCall>,
+    },
+    /// 工具执行结果消息
+    Tool { name: String, content: String },
+}
+
+impl Message {
+    #[must_use]
+    fn human<S: Into<String>>(content: S) -> Self {
+        Self::Human {
+            content: content.into(),
+        }
+    }
+
+    #[must_use]
+    fn ai<S: Into<String>>(content: S) -> Self {
+        Self::Ai {
+            content: content.into(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    fn ai_with_tool_calls<S: Into<String>>(content: S, tool_calls: Vec<ToolCall>) -> Self {
+        Self::Ai {
+            content: content.into(),
+            tool_calls,
+        }
+    }
+
+    #[must_use]
+    fn tool<S: Into<String>, T: Into<String>>(name: S, content: T) -> Self {
+        Self::Tool {
+            name: name.into(),
+            content: content.into(),
+        }
+    }
+
+    #[must_use]
+    fn system<S: Into<String>>(content: S) -> Self {
+        Self::System {
+            content: content.into(),
+        }
+    }
+}
+
+/// 多轮评估样本（Ragas 风格 JSON 结构）。
+#[derive(Debug, Clone, Serialize)]
+pub struct MultiTurnSample {
+    /// 完整对话轨迹
+    pub user_input: Vec<Message>,
+    /// 参考目标或预期结果
+    pub reference: Option<String>,
+    /// 参考工具调用序列
+    pub reference_tool_calls: Option<Vec<ToolCall>>,
+    /// 附加元数据（如 token、时延）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// 将审计对话历史与发现转换为多轮评估样本。
 pub fn to_multi_turn_sample(
     messages: &[ChatMessage],
     findings: &[Finding],
     _target: &str,
 ) -> MultiTurnSample {
-    let ragrs_messages: Vec<Message> = messages
+    let sample_messages: Vec<Message> = messages
         .iter()
         .enumerate()
         .map(|(idx, msg)| convert_message(msg, idx, messages))
@@ -25,10 +107,15 @@ pub fn to_multi_turn_sample(
     // reference 字段序列化 findings 供评估指标使用
     let reference = serde_json::to_string(findings).unwrap_or_default();
 
-    MultiTurnSample::new(ragrs_messages).with_reference(reference)
+    MultiTurnSample {
+        user_input: sample_messages,
+        reference: Some(reference),
+        reference_tool_calls: None,
+        metadata: None,
+    }
 }
 
-/// 将单条 `ChatMessage` 转换为 ragrs `Message`。
+/// 将单条 `ChatMessage` 转换为评估样本 `Message`。
 fn convert_message(msg: &ChatMessage, idx: usize, all: &[ChatMessage]) -> Message {
     match msg.role {
         Role::System => {

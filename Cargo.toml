@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ragrs", "ragrs-bridge", "secaudit", "crates/llm-common"]
+members = ["secaudit", "crates/llm-common"]
 
 [workspace.dependencies]
 async-openai = { version = "0.34", features = ["chat-completion"] }
