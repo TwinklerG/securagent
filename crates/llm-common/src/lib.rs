@@ -141,82 +141,88 @@ pub struct ToolDefinition {
 // ── 类型转换（内部） ────────────────────────────────────────────────────────
 
 /// 将内部 `ChatMessage` 转换为 `async-openai` 请求消息类型。
-fn to_request_message(msg: &ChatMessage) -> Result<ChatCompletionRequestMessage, Error> {
-    match msg.role {
-        Role::System => {
-            let content = msg.content.as_deref().unwrap_or_default();
-            let m = ChatCompletionRequestSystemMessageArgs::default()
-                .content(content)
-                .build()
-                .map_err(|e| Error::Llm(format!("系统消息构建失败：{e}")))?;
-            Ok(m.into())
-        }
-        Role::User => {
-            let content = msg.content.as_deref().unwrap_or_default();
-            let m = ChatCompletionRequestUserMessageArgs::default()
-                .content(content)
-                .build()
-                .map_err(|e| Error::Llm(format!("用户消息构建失败：{e}")))?;
-            Ok(m.into())
-        }
-        Role::Assistant => {
-            let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
-            if let Some(content) = &msg.content {
-                builder.content(content.as_str());
+impl TryFrom<&ChatMessage> for ChatCompletionRequestMessage {
+    type Error = Error;
+
+    fn try_from(msg: &ChatMessage) -> Result<Self, Self::Error> {
+        match msg.role {
+            Role::System => {
+                let content = msg.content.as_deref().unwrap_or_default();
+                let m = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(content)
+                    .build()
+                    .map_err(|e| Error::Llm(format!("系统消息构建失败：{e}")))?;
+                Ok(m.into())
             }
-            if let Some(tool_calls) = &msg.tool_calls {
-                let calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
-                            id: tc.id.clone(),
-                            function: OpenAIFunctionCall {
-                                name: tc.function.name.clone(),
-                                arguments: tc.function.arguments.clone(),
-                            },
+            Role::User => {
+                let content = msg.content.as_deref().unwrap_or_default();
+                let m = ChatCompletionRequestUserMessageArgs::default()
+                    .content(content)
+                    .build()
+                    .map_err(|e| Error::Llm(format!("用户消息构建失败：{e}")))?;
+                Ok(m.into())
+            }
+            Role::Assistant => {
+                let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+                if let Some(content) = &msg.content {
+                    builder.content(content.as_str());
+                }
+                if let Some(tool_calls) = &msg.tool_calls {
+                    let calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            ChatCompletionMessageToolCalls::Function(
+                                ChatCompletionMessageToolCall {
+                                    id: tc.id.clone(),
+                                    function: OpenAIFunctionCall {
+                                        name: tc.function.name.clone(),
+                                        arguments: tc.function.arguments.clone(),
+                                    },
+                                },
+                            )
                         })
-                    })
-                    .collect();
-                builder.tool_calls(calls);
+                        .collect();
+                    builder.tool_calls(calls);
+                }
+                let m = builder
+                    .build()
+                    .map_err(|e| Error::Llm(format!("助手消息构建失败：{e}")))?;
+                Ok(m.into())
             }
-            let m = builder
-                .build()
-                .map_err(|e| Error::Llm(format!("助手消息构建失败：{e}")))?;
-            Ok(m.into())
-        }
-        Role::Tool => {
-            let content = msg.content.as_deref().unwrap_or_default();
-            let tool_call_id = msg.tool_call_id.as_deref().unwrap_or_default();
-            let m = ChatCompletionRequestToolMessageArgs::default()
-                .content(content)
-                .tool_call_id(tool_call_id)
-                .build()
-                .map_err(|e| Error::Llm(format!("工具消息构建失败：{e}")))?;
-            Ok(m.into())
+            Role::Tool => {
+                let content = msg.content.as_deref().unwrap_or_default();
+                let tool_call_id = msg.tool_call_id.as_deref().unwrap_or_default();
+                let m = ChatCompletionRequestToolMessageArgs::default()
+                    .content(content)
+                    .tool_call_id(tool_call_id)
+                    .build()
+                    .map_err(|e| Error::Llm(format!("工具消息构建失败：{e}")))?;
+                Ok(m.into())
+            }
         }
     }
 }
 
 /// 将 `ToolDefinition` 转换为 `async-openai` 工具类型。
-fn to_chat_completion_tool(def: &ToolDefinition) -> Result<ChatCompletionTools, Error> {
-    let function = FunctionObjectArgs::default()
-        .name(&def.name)
-        .description(&def.description)
-        .parameters(def.parameters.clone())
-        .build()
-        .map_err(|e| Error::Llm(format!("工具定义构建失败：{e}")))?;
+impl TryFrom<&ToolDefinition> for ChatCompletionTools {
+    type Error = Error;
 
-    Ok(ChatCompletionTools::Function(ChatCompletionTool {
-        function,
-    }))
+    fn try_from(def: &ToolDefinition) -> Result<Self, Self::Error> {
+        let function = FunctionObjectArgs::default()
+            .name(&def.name)
+            .description(&def.description)
+            .parameters(def.parameters.clone())
+            .build()
+            .map_err(|e| Error::Llm(format!("工具定义构建失败：{e}")))?;
+
+        Ok(Self::Function(ChatCompletionTool { function }))
+    }
 }
 
-/// 将 `async-openai` 工具调用转换为内部类型。
-fn from_tool_calls(calls: &[ChatCompletionMessageToolCalls]) -> Vec<ToolCallResponse> {
-    calls
-        .iter()
-        .map(|tc| match tc {
-            ChatCompletionMessageToolCalls::Function(tc) => ToolCallResponse {
+impl From<&ChatCompletionMessageToolCalls> for ToolCallResponse {
+    fn from(tc: &ChatCompletionMessageToolCalls) -> Self {
+        match tc {
+            ChatCompletionMessageToolCalls::Function(tc) => Self {
                 id: tc.id.clone(),
                 r#type: "function".into(),
                 function: FunctionCall {
@@ -224,7 +230,7 @@ fn from_tool_calls(calls: &[ChatCompletionMessageToolCalls]) -> Vec<ToolCallResp
                     arguments: tc.function.arguments.clone(),
                 },
             },
-            ChatCompletionMessageToolCalls::Custom(tc) => ToolCallResponse {
+            ChatCompletionMessageToolCalls::Custom(tc) => Self {
                 id: tc.id.clone(),
                 r#type: "custom".into(),
                 function: FunctionCall {
@@ -232,8 +238,13 @@ fn from_tool_calls(calls: &[ChatCompletionMessageToolCalls]) -> Vec<ToolCallResp
                     arguments: tc.custom_tool.input.clone(),
                 },
             },
-        })
-        .collect()
+        }
+    }
+}
+
+/// 将 `async-openai` 工具调用转换为内部类型。
+fn from_tool_calls(calls: &[ChatCompletionMessageToolCalls]) -> Vec<ToolCallResponse> {
+    calls.iter().map(ToolCallResponse::from).collect()
 }
 
 // ── 客户端 ───────────────────────────────────────────────────────────────────
@@ -282,7 +293,7 @@ impl HttpLlmClient {
         // 转换消息列表
         let request_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
-            .map(to_request_message)
+            .map(ChatCompletionRequestMessage::try_from)
             .collect::<Result<_, _>>()?;
 
         // 构建请求
@@ -294,7 +305,7 @@ impl HttpLlmClient {
         {
             let chat_tools: Vec<ChatCompletionTools> = tool_defs
                 .iter()
-                .map(to_chat_completion_tool)
+                .map(ChatCompletionTools::try_from)
                 .collect::<Result<_, _>>()?;
             builder.tools(chat_tools);
         }

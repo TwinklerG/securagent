@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::shared::resolve_sandbox_path;
+use super::shared::{canonicalize_work_dir, resolve_search_dir};
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -72,13 +72,10 @@ impl Tool for FindFiles {
             .ok_or_else(|| Error::Tool("缺少 pattern 参数".into()))?;
 
         // 解析搜索路径
-        let search_dir = if let Some(raw) = params.get(PARAM_PATH).and_then(Value::as_str) {
-            resolve_sandbox_path(&self.work_dir, raw)?
-        } else {
-            self.work_dir
-                .canonicalize()
-                .map_err(|e| Error::Tool(format!("工作目录解析失败：{e}")))?
-        };
+        let search_dir = resolve_search_dir(
+            &self.work_dir,
+            params.get(PARAM_PATH).and_then(Value::as_str),
+        )?;
 
         if !search_dir.is_dir() {
             return Err(Error::Tool(format!(
@@ -98,10 +95,7 @@ impl Tool for FindFiles {
         let entries = glob::glob(&full_pattern)
             .map_err(|e| Error::Tool(format!("glob 模式无效「{pattern}」：{e}")))?;
 
-        let sandbox = self
-            .work_dir
-            .canonicalize()
-            .map_err(|e| Error::Tool(format!("工作目录解析失败：{e}")))?;
+        let sandbox = canonicalize_work_dir(&self.work_dir)?;
 
         let mut output = String::new();
         let mut count: usize = 0;

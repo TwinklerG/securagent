@@ -353,8 +353,12 @@ impl Agent {
         self.events.notify_think(&plan);
 
         // 3. 策略推理循环
-        let mut strat =
-            strategy::StrategyKind::from_str_name(&self.config.reasoning_strategy).build();
+        let mut strat = self
+            .config
+            .reasoning_strategy
+            .parse::<strategy::StrategyKind>()
+            .unwrap_or_default()
+            .build();
         let strategy_result = strat
             .run(&mut executor, &mut self.events, &self.config)
             .await?;

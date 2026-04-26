@@ -4,6 +4,7 @@ use std::iter::repeat_n;
 
 use colored::Colorize;
 
+use super::truncate_with_ellipsis;
 use crate::agent::AuditReport;
 use crate::agent::state::AgentState;
 
@@ -32,19 +33,12 @@ pub fn print_state(state: &AgentState) {
 
 /// 思考摘要最大字符数
 const THINKING_MAX_CHARS: usize = 200;
-/// 省略标记
-const ELLIPSIS: &str = "...";
 
 /// 打印思考过程
 pub fn print_thinking(text: &str) {
     // 截取首行，限制长度避免刷屏
     let preview = text.lines().next().unwrap_or(text);
-    let display: String = if preview.chars().count() > THINKING_MAX_CHARS {
-        let truncated: String = preview.chars().take(THINKING_MAX_CHARS).collect();
-        format!("{truncated}{ELLIPSIS}")
-    } else {
-        preview.to_owned()
-    };
+    let display = truncate_with_ellipsis(preview, THINKING_MAX_CHARS);
     println!("{} {}", "[思考]".dimmed(), display.dimmed());
 }
 
@@ -63,12 +57,7 @@ const TOOL_RESULT_MAX_CHARS: usize = 300;
 
 /// 打印工具执行结果（截断显示）
 pub fn print_tool_result(name: &str, result: &str) {
-    let preview = if result.chars().count() > TOOL_RESULT_MAX_CHARS {
-        let truncated: String = result.chars().take(TOOL_RESULT_MAX_CHARS).collect();
-        format!("{truncated}{ELLIPSIS}")
-    } else {
-        result.to_owned()
-    };
+    let preview = truncate_with_ellipsis(result, TOOL_RESULT_MAX_CHARS);
     println!(
         "{} {} → {}",
         "[结果]".dimmed(),

@@ -3,6 +3,8 @@
 mod react;
 mod reflexion;
 
+use std::str::FromStr;
+
 pub use react::ReactStrategy;
 pub use reflexion::ReflexionStrategy;
 
@@ -50,22 +52,24 @@ pub const STRATEGY_REACT: &str = "react";
 pub const STRATEGY_REFLEXION: &str = "reflexion";
 
 impl StrategyKind {
-    /// 从字符串标识解析策略类型。
-    #[must_use]
-    pub fn from_str_name(s: &str) -> Self {
-        // TODO: 用一个 FromStr trait
-        match s {
-            STRATEGY_REFLEXION => Self::Reflexion,
-            _ => Self::React,
-        }
-    }
-
     /// 创建对应的策略实例。
     #[must_use]
     pub fn build(self) -> Box<dyn Strategy> {
         match self {
             Self::React => Box::new(ReactStrategy),
             Self::Reflexion => Box::new(ReflexionStrategy::new()),
+        }
+    }
+}
+
+impl FromStr for StrategyKind {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            STRATEGY_REACT => Ok(Self::React),
+            STRATEGY_REFLEXION => Ok(Self::Reflexion),
+            _ => Err(()),
         }
     }
 }

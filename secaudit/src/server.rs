@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ use tower_http::cors::CorsLayer;
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::llm::{ChatMessage, Role};
+use crate::output::truncate_with_ellipsis;
 use crate::session::Session;
 use crate::tools::ConfirmFn;
 
@@ -187,19 +188,42 @@ struct SessionInstance {
     tx: broadcast::Sender<SsePayload>,
 }
 
+type SharedSession = Arc<Mutex<SessionInstance>>;
+
 /// 共享应用状态
 #[derive(Clone)]
 struct AppState {
     /// 应用配置
     config: Config,
     /// 活跃会话（会话 ID → 会话实例）
-    sessions: Arc<Mutex<HashMap<u64, Arc<Mutex<SessionInstance>>>>>,
+    sessions: Arc<Mutex<HashMap<u64, SharedSession>>>,
     /// 下一个会话 ID
     next_id: Arc<Mutex<u64>>,
     /// 待处理的确认请求（会话 ID → 响应发送端）
     ///
     /// 与 `SessionInstance` 分离存储，避免 Agent 运行时持锁导致确认端点死锁。
     pending_confirms: Arc<Mutex<HashMap<u64, oneshot::Sender<bool>>>>,
+}
+
+impl AppState {
+    async fn allocate_session_id(&self) -> u64 {
+        let mut next_id = self.next_id.lock().await;
+        let id = *next_id;
+        *next_id += 1;
+        id
+    }
+
+    async fn get_session(&self, id: u64) -> Option<SharedSession> {
+        self.sessions.lock().await.get(&id).cloned()
+    }
+
+    async fn insert_session(&self, id: u64, session: SharedSession) {
+        self.sessions.lock().await.insert(id, session);
+    }
+
+    async fn take_pending_confirm(&self, id: u64) -> Option<oneshot::Sender<bool>> {
+        self.pending_confirms.lock().await.remove(&id)
+    }
 }
 
 /// 创建 Web 模式的异步确认回调。
@@ -240,35 +264,11 @@ const STATUS_OK: &str = "ok";
 /// 工具结果摘要最大长度
 const TOOL_RESULT_SUMMARY_LEN: usize = 500;
 
-/// `POST /api/sessions` — 创建新会话
-async fn handle_create_session(
-    State(state): State<AppState>,
-    Json(req): Json<CreateSessionRequest>,
-) -> impl IntoResponse {
-    let work_dir = PathBuf::from(&req.work_dir);
+fn json_error(message: impl Into<String>) -> Response {
+    Json(serde_json::json!({ "error": message.into() })).into_response()
+}
 
-    if !work_dir.is_dir() {
-        return Json(serde_json::json!({
-            "error": format!("工作目录不存在：{}", req.work_dir)
-        }))
-        .into_response();
-    }
-
-    let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-    let tx_clone = tx.clone();
-
-    // 分配会话 ID
-    let mut next_id = state.next_id.lock().await;
-    let id = *next_id;
-    *next_id += 1;
-    drop(next_id);
-
-    // 创建异步确认回调
-    let confirm = web_confirm(id, tx.clone(), Arc::clone(&state.pending_confirms));
-
-    let mut agent = Agent::new(state.config.clone(), work_dir.clone(), confirm);
-
-    // 设置 SSE 回调
+fn attach_sse_callbacks(agent: &mut Agent, tx: &broadcast::Sender<SsePayload>) {
     let tx_state = tx.clone();
     agent.on_state_change(move |s| {
         let _ = tx_state.send(SsePayload::State {
@@ -291,19 +291,37 @@ async fn handle_create_session(
         });
     });
 
-    let tx_result = tx_clone;
+    let tx_result = tx.clone();
     agent.on_tool_result(move |name, result| {
-        let summary = if result.len() > TOOL_RESULT_SUMMARY_LEN {
-            let truncated: String = result.chars().take(TOOL_RESULT_SUMMARY_LEN).collect();
-            format!("{truncated}...")
-        } else {
-            result.into()
-        };
+        let summary = truncate_with_ellipsis(result, TOOL_RESULT_SUMMARY_LEN);
         let _ = tx_result.send(SsePayload::ToolResult {
             name: name.into(),
             result: summary,
         });
     });
+}
+
+/// `POST /api/sessions` — 创建新会话
+async fn handle_create_session(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSessionRequest>,
+) -> impl IntoResponse {
+    let work_dir = PathBuf::from(&req.work_dir);
+
+    if !work_dir.is_dir() {
+        return json_error(format!("工作目录不存在：{}", req.work_dir));
+    }
+
+    let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+    let id = state.allocate_session_id().await;
+
+    // 创建异步确认回调
+    let confirm = web_confirm(id, tx.clone(), Arc::clone(&state.pending_confirms));
+
+    let mut agent = Agent::new(state.config.clone(), work_dir.clone(), confirm);
+
+    // 设置 SSE 回调
+    attach_sse_callbacks(&mut agent, &tx);
 
     let session_instance = SessionInstance {
         agent,
@@ -312,7 +330,7 @@ async fn handle_create_session(
     };
 
     let instance = Arc::new(Mutex::new(session_instance));
-    state.sessions.lock().await.insert(id, instance);
+    state.insert_session(id, instance).await;
 
     Json(SessionCreated { id }).into_response()
 }
@@ -323,11 +341,9 @@ async fn handle_send_message(
     Path(id): Path<u64>,
     Json(req): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
-    let sessions = state.sessions.lock().await;
-    let Some(instance) = sessions.get(&id).cloned() else {
-        return Json(serde_json::json!({ "error": "会话不存在" })).into_response();
+    let Some(instance) = state.get_session(id).await else {
+        return json_error("会话不存在");
     };
-    drop(sessions);
 
     let content = req.content;
 
@@ -359,26 +375,21 @@ async fn handle_session_events(
     State(state): State<AppState>,
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
-    let sessions = state.sessions.lock().await;
+    let Some(instance) = state.get_session(id).await else {
+        return json_error("会话不存在");
+    };
 
-    if let Some(instance) = sessions.get(&id) {
-        let rx = instance.lock().await.tx.subscribe();
-        drop(sessions);
+    let rx = instance.lock().await.tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(payload) => {
+            let data = serde_json::to_string(&payload).unwrap_or_default();
+            let event = Event::default().event(payload.event_name()).data(data);
+            Some(Ok::<_, Infallible>(event))
+        }
+        Err(_) => None,
+    });
 
-        let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-            Ok(payload) => {
-                let data = serde_json::to_string(&payload).unwrap_or_default();
-                let event = Event::default().event(payload.event_name()).data(data);
-                Some(Ok::<_, Infallible>(event))
-            }
-            Err(_) => None,
-        });
-
-        Sse::new(stream).into_response()
-    } else {
-        drop(sessions);
-        Json(serde_json::json!({ "error": "会话不存在" })).into_response()
-    }
+    Sse::new(stream).into_response()
 }
 
 /// `POST /api/sessions/:id/confirm` — 回复确认请求
@@ -390,13 +401,11 @@ async fn handle_confirm(
     Path(id): Path<u64>,
     Json(req): Json<ConfirmResponse>,
 ) -> impl IntoResponse {
-    let sender = state.pending_confirms.lock().await.remove(&id);
-
-    if let Some(tx) = sender {
+    if let Some(tx) = state.take_pending_confirm(id).await {
         let _ = tx.send(req.approved);
         Json(StatusResponse { status: STATUS_OK }).into_response()
     } else {
-        Json(serde_json::json!({ "error": "无待处理的确认请求" })).into_response()
+        json_error("无待处理的确认请求")
     }
 }
 
@@ -409,11 +418,9 @@ async fn handle_chat(
     Path(id): Path<u64>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    let sessions = state.sessions.lock().await;
-    let Some(instance) = sessions.get(&id).cloned() else {
-        return Json(serde_json::json!({ "error": "会话不存在" })).into_response();
+    let Some(instance) = state.get_session(id).await else {
+        return json_error("会话不存在");
     };
-    drop(sessions);
 
     let start = Instant::now();
 
@@ -510,11 +517,9 @@ async fn handle_chat(
 ///
 /// 返回对话消息和工具调用统计，便于调试和评估。
 async fn handle_history(State(state): State<AppState>, Path(id): Path<u64>) -> impl IntoResponse {
-    let sessions = state.sessions.lock().await;
-    let Some(instance) = sessions.get(&id).cloned() else {
-        return Json(serde_json::json!({ "error": "会话不存在" })).into_response();
+    let Some(instance) = state.get_session(id).await else {
+        return json_error("会话不存在");
     };
-    drop(sessions);
 
     let inst = instance.lock().await;
     let session = &inst.session;

@@ -9,7 +9,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use super::shared::{is_binary, resolve_sandbox_path};
+use super::shared::{canonicalize_work_dir, is_binary, resolve_search_dir};
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -74,7 +74,7 @@ async fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
         };
         if ft.is_dir() {
             Box::pin(collect_files_recursive(&path, files)).await;
-        } else if !ft.is_dir() {
+        } else {
             files.push(path);
         }
     }
@@ -151,13 +151,10 @@ impl Tool for SearchContent {
             .map_err(|e| Error::Tool(format!("正则表达式无效「{pattern_str}」：{e}")))?;
 
         // 解析搜索路径
-        let search_dir = if let Some(raw) = params.get(PARAM_PATH).and_then(Value::as_str) {
-            resolve_sandbox_path(&self.work_dir, raw)?
-        } else {
-            self.work_dir
-                .canonicalize()
-                .map_err(|e| Error::Tool(format!("工作目录解析失败：{e}")))?
-        };
+        let search_dir = resolve_search_dir(
+            &self.work_dir,
+            params.get(PARAM_PATH).and_then(Value::as_str),
+        )?;
 
         if !search_dir.is_dir() {
             return Err(Error::Tool(format!(
@@ -189,10 +186,7 @@ impl Tool for SearchContent {
         let mut match_count: usize = 0;
         let mut output = String::new();
 
-        let sandbox = self
-            .work_dir
-            .canonicalize()
-            .map_err(|e| Error::Tool(format!("工作目录解析失败：{e}")))?;
+        let sandbox = canonicalize_work_dir(&self.work_dir)?;
 
         for file_path in &files {
             if match_count >= max_results {

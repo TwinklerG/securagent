@@ -53,17 +53,16 @@ pub trait Tool: Send + Sync {
 
 /// 创建默认工具集（交互模式），包含通用文件操作工具和安全专用工具。
 pub fn default_tools(work_dir: PathBuf, confirm: ConfirmFn) -> Vec<Box<dyn Tool>> {
-    vec![
+    let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadFile::new(work_dir.clone())),
         Box::new(ListDirectory::new(work_dir.clone())),
         Box::new(SearchContent::new(work_dir.clone())),
         Box::new(FindFiles::new(work_dir.clone())),
         Box::new(ExecuteCommand::new(work_dir.clone(), Arc::clone(&confirm))),
         Box::new(WriteFile::new(work_dir, confirm)),
-        Box::new(SemgrepScanner::new()),
-        Box::new(DependencyChecker),
-        Box::new(NvdLookup::new()),
-    ]
+    ];
+    tools.extend(security_audit_tools());
+    tools
 }
 
 /// 创建单文件审计专用工具集 — 仅包含只读分析工具。
@@ -71,6 +70,11 @@ pub fn default_tools(work_dir: PathBuf, confirm: ConfirmFn) -> Vec<Box<dyn Tool>
 /// 单文件审计时代码已内联在 prompt 中，不需要文件操作和命令执行工具。
 /// 限制工具集可避免 LLM 写入无关文件、安装软件等浪费行为。
 pub fn audit_tools() -> Vec<Box<dyn Tool>> {
+    security_audit_tools()
+}
+
+/// 创建安全审计专用工具集（无文件写入/命令执行）。
+fn security_audit_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(SemgrepScanner::new()),
         Box::new(DependencyChecker),

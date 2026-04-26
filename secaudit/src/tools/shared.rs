@@ -32,9 +32,7 @@ pub fn resolve_sandbox_path(work_dir: &Path, raw: &str) -> Result<PathBuf, Error
         .canonicalize()
         .map_err(|e| Error::Tool(format!("{MSG_PATH_RESOLVE_FAIL}「{raw}」：{e}")))?;
 
-    let sandbox = work_dir
-        .canonicalize()
-        .map_err(|e| Error::Tool(format!("{MSG_WORK_DIR_RESOLVE_FAIL}：{e}")))?;
+    let sandbox = canonicalize_work_dir(work_dir)?;
 
     if !resolved.starts_with(&sandbox) {
         return Err(Error::Tool(format!(
@@ -44,6 +42,23 @@ pub fn resolve_sandbox_path(work_dir: &Path, raw: &str) -> Result<PathBuf, Error
     }
 
     Ok(resolved)
+}
+
+/// 规范化工作目录路径。
+pub fn canonicalize_work_dir(work_dir: &Path) -> Result<PathBuf, Error> {
+    work_dir
+        .canonicalize()
+        .map_err(|e| Error::Tool(format!("{MSG_WORK_DIR_RESOLVE_FAIL}：{e}")))
+}
+
+/// 解析搜索目录参数：
+/// - 传入 `raw` 时按沙箱规则解析；
+/// - 未传入时返回规范化后的工作目录。
+pub fn resolve_search_dir(work_dir: &Path, raw: Option<&str>) -> Result<PathBuf, Error> {
+    raw.map_or_else(
+        || canonicalize_work_dir(work_dir),
+        |path| resolve_sandbox_path(work_dir, path),
+    )
 }
 
 /// 异步判断文件是否为二进制文件（前 `BINARY_CHECK_SIZE` 字节中是否含空字节）。
