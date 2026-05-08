@@ -46,19 +46,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_EVENT_LINES: usize = 500;
 const MAX_MESSAGE_ITEMS: usize = 240;
 const KEY_CTRL_C: char = 'c';
+const KEY_CTRL_D: char = 'd';
 const DEFAULT_VIEWPORT_HEIGHT: u16 = 10;
 const MAX_INPUT_LINES: usize = 6;
 
 const WELCOME_MSG: &str = "secaudit -- 安全代码审计 Agent（TUI）";
-const HELP_HINT: &str = "输入审计指令后回车，命令：/help /clear /status /tools /exit";
+const HELP_HINT: &str = "输入审计指令后回车，命令：/help /clear /status /tools /exit，Ctrl+D 退出";
 
-const FOOTER_HINT: &str = "F1 帮助  Ctrl+L 切换事件面板  Ctrl+J/K 事件滚动  Tab 补全  Ctrl+P/N 历史  Shift+Enter 多行  Enter 发送";
+const FOOTER_HINT: &str = "F1 帮助  Ctrl+L 切换事件面板  Ctrl+J/K 事件滚动  Tab 补全  Ctrl+P/N 历史  Shift+Enter 多行  Enter 发送  Ctrl+D 退出";
 
 const HELP_TEXT: &[&str] = &[
     "快捷键",
     "  Enter                发送输入（单行）",
     "  Shift+Enter          新增输入行（多行）",
-    "  Ctrl+C / /exit       退出",
+    "  Ctrl+C / Ctrl+D / /exit 退出",
     "  F1                   打开/关闭帮助",
     "  Ctrl+L               折叠/展开事件面板",
     "  Ctrl+J / Ctrl+K      滚动事件面板",
@@ -1162,7 +1163,9 @@ fn process_terminal_key(
     app: &mut TuiApp,
     command_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(KEY_CTRL_C) {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(KEY_CTRL_C | KEY_CTRL_D))
+    {
         app.should_quit = true;
         return;
     }
