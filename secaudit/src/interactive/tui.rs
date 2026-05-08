@@ -1163,9 +1163,7 @@ fn process_terminal_key(
     app: &mut TuiApp,
     command_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(KEY_CTRL_C | KEY_CTRL_D))
-    {
+    if is_quit_key(key.code, key.modifiers) {
         app.should_quit = true;
         return;
     }
@@ -1287,6 +1285,11 @@ fn process_terminal_key(
     }
 }
 
+fn is_quit_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(code, KeyCode::Char(KEY_CTRL_C | KEY_CTRL_D))
+}
+
 pub async fn run(config: Config, work_dir: PathBuf) {
     let mut terminal_guard = match TerminalGuard::new() {
         Ok(guard) => guard,
@@ -1349,5 +1352,79 @@ fn handle_command(
         }
         Command::Tools => app.show_tools(),
         Command::Exit => app.should_quit = true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    use super::{HELP_EVENT_SUMMARY, HELP_TEXT, InputBuffer, TuiApp, is_quit_key};
+
+    #[test]
+    fn help_command_uses_single_message() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let message_count = app.messages.len();
+        let event_count = app.events.len();
+
+        app.show_help_text();
+
+        let expected_help = HELP_TEXT.join("\n");
+        assert_eq!(
+            app.messages.len(),
+            message_count + 1,
+            "帮助命令应只追加一条消息"
+        );
+        assert_eq!(
+            app.events.len(),
+            event_count + 1,
+            "帮助命令应只追加一条事件"
+        );
+        assert_eq!(
+            app.messages.last().map(|msg| msg.content.as_str()),
+            Some(expected_help.as_str()),
+            "帮助消息内容应保留完整多行文本"
+        );
+        assert_eq!(
+            app.events.last().map(|event| event.text.as_str()),
+            Some(HELP_EVENT_SUMMARY),
+            "帮助事件应使用摘要文本"
+        );
+    }
+
+    #[test]
+    fn cursor_display_col_counts_full_width_chars() {
+        let mut input = InputBuffer::new();
+        input.insert_char('中');
+        input.insert_char('a');
+        input.insert_char('文');
+
+        assert_eq!(input.cursor_display_col(), 5, "中文字符应按双宽计算");
+
+        input.move_left();
+
+        assert_eq!(
+            input.cursor_display_col(),
+            3,
+            "左移后光标仍应按显示宽度定位"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_is_quit_key() {
+        assert!(
+            is_quit_key(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            "Ctrl+D 应触发退出"
+        );
+        assert!(
+            is_quit_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            "Ctrl+C 应继续触发退出"
+        );
+        assert!(
+            !is_quit_key(KeyCode::Char('d'), KeyModifiers::NONE),
+            "普通 d 不应触发退出"
+        );
     }
 }
