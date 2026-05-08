@@ -34,6 +34,7 @@ use secaudit_agent::Agent;
 use secaudit_agent::state::AgentState;
 use secaudit_core::Config;
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 use super::commands::{Command, UserInput};
 use super::{ChatRequest, WorkerCommand, WorkerEvent, build_worker_session, parse_user_input};
@@ -412,6 +413,15 @@ impl InputBuffer {
     fn move_line_end(&mut self) {
         self.ensure_invariants();
         self.cursor_col = self.current_line_len();
+    }
+
+    fn cursor_display_col(&self) -> usize {
+        let Some(line) = self.lines.get(self.cursor_line) else {
+            return 0;
+        };
+
+        let byte_idx = char_to_byte_idx(line, self.cursor_col);
+        line.get(..byte_idx).map_or(0, UnicodeWidthStr::width)
     }
 
     fn visual_lines(&self) -> Vec<Line<'_>> {
@@ -845,7 +855,7 @@ impl TuiApp {
         if self.show_help {
             draw_help_overlay(frame);
         } else {
-            let col_u16 = u16::try_from(self.input.cursor_col).unwrap_or(u16::MAX);
+            let col_u16 = u16::try_from(self.input.cursor_display_col()).unwrap_or(u16::MAX);
             let line_u16 = u16::try_from(self.input.cursor_line).unwrap_or(u16::MAX);
             let cursor_x = input_area.x.saturating_add(1).saturating_add(col_u16);
             let cursor_y = input_area.y.saturating_add(1).saturating_add(line_u16);
