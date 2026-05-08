@@ -14,7 +14,6 @@ mod markdown;
 mod timestamp;
 
 use std::io::{self, Stdout, Write};
-use std::iter;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,6 +74,11 @@ const HELP_TEXT: &[&str] = &[
     "  /tools  列出工具",
     "  /exit   退出",
 ];
+
+const HELP_EVENT_SUMMARY: &str = "已显示帮助。";
+const STATUS_EVENT_SUMMARY: &str = "已显示当前状态。";
+const TOOLS_EVENT_SUMMARY: &str = "已显示可用工具。";
+const CLEAR_EVENT_SUMMARY: &str = "对话历史与事件已清空。";
 
 const COMMAND_CANDIDATES: [&str; 5] = ["/help", "/clear", "/status", "/tools", "/exit"];
 
@@ -567,6 +571,11 @@ impl TuiApp {
         self.push_event(EventKind::System, text.to_owned());
     }
 
+    fn push_system_block(&mut self, text: &str, event_summary: &str) {
+        self.push_message(MessageRole::System, text);
+        self.push_event(EventKind::System, event_summary.to_owned());
+    }
+
     fn push_state(&mut self, state: &AgentState) {
         state.label().clone_into(&mut self.last_state_label);
         self.push_event(EventKind::State, state.label().to_owned());
@@ -621,26 +630,30 @@ impl TuiApp {
         self.chat_scroll = 0;
         self.event_scroll = 0;
         self.follow_chat = true;
-        self.push_system("对话历史与事件已清空。");
-        self.push_system(HELP_HINT);
+        self.push_system_block(
+            &format!("{CLEAR_EVENT_SUMMARY}\n{HELP_HINT}"),
+            CLEAR_EVENT_SUMMARY,
+        );
     }
 
     fn show_help_text(&mut self) {
-        self.push_system(&HELP_TEXT.join("\n"));
+        self.push_system_block(&HELP_TEXT.join("\n"), HELP_EVENT_SUMMARY);
     }
 
     fn show_status(&mut self) {
-        let mut system_str_vec = vec![
-            format!("工作目录：{}", self.work_dir.display()),
-            format!("当前状态：{}", self.last_state_label),
-            format!("对话消息数：{}", self.message_count),
-        ];
-        if self.busy {
-            system_str_vec.push("Agent 运行中".into());
+        let activity = if self.busy {
+            "Agent 运行中"
         } else {
-            system_str_vec.push("Agent 空闲".into());
-        }
-        self.push_system(&system_str_vec.join("\n"));
+            "Agent 空闲"
+        };
+        let status = format!(
+            "工作目录：{}\n当前状态：{}\n对话消息数：{}\n{}",
+            self.work_dir.display(),
+            self.last_state_label,
+            self.message_count,
+            activity
+        );
+        self.push_system_block(&status, STATUS_EVENT_SUMMARY);
     }
 
     fn show_tools(&mut self) {
@@ -649,12 +662,13 @@ impl TuiApp {
             return;
         }
 
-        self.push_system(
-            &iter::once("可用工具：".to_owned())
-                .chain(self.tool_names.iter().map(|name| format!("  - {name}")))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        let tools = self
+            .tool_names
+            .iter()
+            .map(|name| format!("  - {name}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.push_system_block(&format!("可用工具：\n{tools}"), TOOLS_EVENT_SUMMARY);
     }
 
     fn toggle_event_panel(&mut self) {
