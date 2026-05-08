@@ -14,6 +14,7 @@ mod markdown;
 mod timestamp;
 
 use std::io::{self, Stdout, Write};
+use std::iter;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -529,9 +530,14 @@ impl TuiApp {
             event_panel_collapsed: false,
         };
 
-        app.push_system(WELCOME_MSG);
-        app.push_system(&format!("工作目录：{}", app.work_dir.display()));
-        app.push_system(HELP_HINT);
+        app.push_system(
+            &[
+                WELCOME_MSG,
+                &format!("工作目录：{}", app.work_dir.display()),
+                HELP_HINT,
+            ]
+            .join("\n"),
+        );
         app.push_event(
             EventKind::System,
             "事件面板默认展开，可按 Ctrl+L 折叠。".to_owned(),
@@ -620,20 +626,21 @@ impl TuiApp {
     }
 
     fn show_help_text(&mut self) {
-        for line in HELP_TEXT {
-            self.push_system(line);
-        }
+        self.push_system(&HELP_TEXT.join("\n"));
     }
 
     fn show_status(&mut self) {
-        self.push_system(&format!("工作目录：{}", self.work_dir.display()));
-        self.push_system(&format!("当前状态：{}", self.last_state_label));
-        self.push_system(&format!("对话消息数：{}", self.message_count));
-        self.push_system(if self.busy {
-            "Agent 运行中"
+        let mut system_str_vec = vec![
+            format!("工作目录：{}", self.work_dir.display()),
+            format!("当前状态：{}", self.last_state_label),
+            format!("对话消息数：{}", self.message_count),
+        ];
+        if self.busy {
+            system_str_vec.push("Agent 运行中".into());
         } else {
-            "Agent 空闲"
-        });
+            system_str_vec.push("Agent 空闲".into());
+        }
+        self.push_system(&system_str_vec.join("\n"));
     }
 
     fn show_tools(&mut self) {
@@ -642,10 +649,12 @@ impl TuiApp {
             return;
         }
 
-        self.push_system("可用工具:");
-        for name in self.tool_names.clone() {
-            self.push_system(&format!("  - {name}"));
-        }
+        self.push_system(
+            &iter::once("可用工具：".to_owned())
+                .chain(self.tool_names.iter().map(|name| format!("  - {name}")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
 
     fn toggle_event_panel(&mut self) {
