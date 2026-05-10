@@ -1,9 +1,12 @@
 // CLI 彩色输出
 
 use std::iter::repeat_n;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use super::truncate_with_ellipsis;
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use secaudit_agent::AuditReport;
 use secaudit_agent::state::AgentState;
 
@@ -12,32 +15,66 @@ const SEPARATOR_LEN: usize = 60;
 /// 分隔线字符
 const SEPARATOR_CHAR: char = '-';
 
+/// Spinner 动画帧（Unicode Braille patterns）
+const SPINNER_TICK_CHARS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+/// 全局 spinner 实例
+static SPINNER: OnceLock<ProgressBar> = OnceLock::new();
+
+/// 获取或初始化 spinner
+fn get_spinner() -> ProgressBar {
+    SPINNER
+        .get_or_init(|| {
+            let pb = ProgressBar::new_spinner();
+            pb.enable_steady_tick(Duration::from_millis(80));
+            pb.set_style(
+                #[expect(clippy::expect_used, reason = "静态模板字符串，编译时已知有效")]
+                ProgressStyle::default_spinner()
+                    .tick_chars(SPINNER_TICK_CHARS)
+                    .template("{spinner:.green} {msg}")
+                    .expect("invalid spinner template"),
+            );
+            pb
+        })
+        .clone()
+}
+
 /// 打印状态转换
 pub fn print_state(state: &AgentState) {
+    let spinner = get_spinner();
     let label = state.label();
-    let text = match state {
-        AgentState::Init => format!("[>> {label}] 加载配置与工具").green(),
-        AgentState::Planning => format!("[>> {label}] 分析代码，制定审计计划").blue(),
+    let msg = match state {
+        AgentState::Init => format!("[>> {label}] 加载配置与工具"),
+        AgentState::Planning => format!("[>> {label}] 分析代码，制定审计计划"),
         AgentState::Executing { iteration } => {
-            format!("[>> {label}] 第 {} 轮 ReAct 循环", iteration + 1).yellow()
+            format!("[>> {label}] 第 {} 轮 ReAct 循环", iteration + 1)
         }
-        AgentState::Analyzing => format!("[>> {label}] 处理工具返回结果").yellow(),
-        AgentState::Reflecting => format!("[>> {label}] 回顾发现，剔除误报").blue(),
-        AgentState::Extracting => format!("[>> {label}] 提取结构化发现").blue(),
-        AgentState::Reporting => format!("[>> {label}] 生成审计报告").blue(),
-        AgentState::Done => format!("[>> {label}] 审计完成").green(),
+        AgentState::Analyzing => format!("[>> {label}] 处理工具返回结果"),
+        AgentState::Reflecting => format!("[>> {label}] 回顾发现，剔除误报"),
+        AgentState::Extracting => format!("[>> {label}] 提取结构化发现"),
+        AgentState::Reporting => format!("[>> {label}] 生成审计报告"),
+        AgentState::Done => {
+            spinner.finish_and_clear();
+            println!("{}", format!("[{label}] 审计完成").green());
+            return;
+        }
     };
-    println!("{text}");
+
+    spinner.set_message(msg);
 }
 
 /// 打印工具调用
 pub fn print_tool_call(name: &str, args: &str) {
-    println!(
-        "{} {}({})",
-        "[工具]".cyan().bold(),
-        name.cyan(),
-        args.cyan()
-    );
+    // 先停止 spinner 一行，打印工具信息，再恢复
+    let spinner = get_spinner();
+    spinner.suspend(|| {
+        println!(
+            "{} {}({})",
+            "[工具]".cyan().bold(),
+            name.cyan(),
+            args.cyan()
+        );
+    });
 }
 
 /// 思考摘要最大字符数
@@ -48,7 +85,11 @@ pub fn print_thinking(text: &str) {
     // 截取首行，限制长度避免刷屏
     let preview = text.lines().next().unwrap_or(text);
     let display = truncate_with_ellipsis(preview, THINKING_MAX_CHARS);
-    println!("{} {}", "[思考]".dimmed(), display.dimmed());
+
+    let spinner = get_spinner();
+    spinner.suspend(|| {
+        println!("{} {}", "[思考]".dimmed(), display.dimmed());
+    });
 }
 
 /// 打印分隔线
