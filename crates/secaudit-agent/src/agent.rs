@@ -17,6 +17,7 @@ use executor::{ReActExecutor, StepResult};
 use state::AgentState;
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 /// 审计发现
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +282,7 @@ impl Agent {
 
             match step {
                 StepResult::ToolCalls(calls) => {
+                    debug!("第 {iteration} 轮工具调用：{calls:?}");
                     empty_rounds = 0;
                     for call in &calls {
                         self.events
