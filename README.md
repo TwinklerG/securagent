@@ -47,7 +47,7 @@ just run test.py
 # 指定语言和输出格式
 just run test.py -l python -f markdown
 
-# 导出 trajectory（供评估平台使用）
+# 导出 trajectory
 just run test.py -o trajectory.json
 
 # 使用 Reflexion 策略
@@ -121,7 +121,6 @@ just eval-batch --strategies react --runs 1 --case-filter project-securagent-roo
 
 - `summary.json`：策略级汇总指标
 - `case-metrics.jsonl`：逐样本指标明细
-- `platform-import.jsonl`：评估平台导入友好格式
 
 ## 工具集
 
@@ -200,22 +199,3 @@ uv run prepare_dataset.py --output-dir ../datasets
 - `mapping_version`：HF 标签映射版本（仅 HF 记录）
 
 `coverage_report.json` 用于记录映射覆盖率、漏洞分布与未覆盖标签，便于迭代三的"评估-优化-再评估"闭环追踪。
-
-### 一键导入到评估平台
-
-```bash
-cd scripts
-
-# 导入到任务样本（/api/samples）
-uv run import_prepared_dataset.py \
-	--input-file ../datasets/code_vulnerability_labeled.json \
-	--input-file ../datasets/owasp_benchmark.json \
-	--task-id 1
-
-# 导入到指定数据集（/api/datasets/:id/samples）
-uv run import_prepared_dataset.py \
-	--input-file ../datasets/owasp_benchmark.json \
-	--task-id 1 --dataset-id 2
-```
-
-支持 `--dry-run` 先做结构检查，不发送请求。

@@ -2,6 +2,7 @@ target/
 datasets/
 .env
 __pycache__
+**/.venv/
 AGENTS.md
 CLAUDE.md
 .claude

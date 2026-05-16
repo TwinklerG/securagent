@@ -5,7 +5,7 @@
 - 基于本仓库 demo manifest 跑 react/reflexion 两组实验
 - 自动调用 `just run` 导出 trajectory
 - 计算显式指标（漏洞检出率、误报率、CWE 准确率、token、时延）
-- 产出评估平台可消费的 JSONL 与汇总 JSON
+- 产出逐 case 指标 JSONL 与策略级汇总 JSON
 
 约束：
 - 不依赖外部 Python 三方包（仅标准库）
@@ -658,37 +658,6 @@ def main() -> int:
     dump_jsonl(output_dir / "case-metrics.jsonl", rows)
     dump_json(output_dir / "summary.json", summary)
 
-    # 评估平台导入友好格式（一个 case 一行，附最核心字段）
-    platform_rows: list[dict[str, Any]] = []
-    for metric in all_metrics:
-        platform_rows.append(
-            {
-                "case_id": metric.case_id,
-                "strategy": metric.strategy,
-                "run_index": metric.run_index,
-                "input": {
-                    "target": metric.target,
-                    "expected_cwe_ids": metric.expected_cwe_ids,
-                },
-                "output": {
-                    "predicted_cwe_ids": metric.predicted_cwe_ids,
-                    "metrics": {
-                        "vulnerability_detection_rate": metric.vulnerability_detection_rate,
-                        "false_positive_rate": metric.false_positive_rate,
-                        "cwe_classification_accuracy": metric.cwe_classification_accuracy,
-                        "duration_ms": metric.duration_ms,
-                        "token_total": metric.token_total,
-                        "token_prompt": metric.token_prompt,
-                        "token_completion": metric.token_completion,
-                        "token_efficiency": metric.token_efficiency,
-                    },
-                },
-                "trajectory_path": metric.trajectory_path,
-            }
-        )
-
-    dump_jsonl(output_dir / "platform-import.jsonl", platform_rows)
-
     print(
         json.dumps(
             {
@@ -696,9 +665,6 @@ def main() -> int:
                 "summary_path": str((output_dir / "summary.json").relative_to(ROOT)),
                 "case_metrics_path": str(
                     (output_dir / "case-metrics.jsonl").relative_to(ROOT)
-                ),
-                "platform_import_path": str(
-                    (output_dir / "platform-import.jsonl").relative_to(ROOT)
                 ),
             },
             ensure_ascii=False,
