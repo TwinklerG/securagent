@@ -32,12 +32,16 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use secaudit_agent::Agent;
 use secaudit_agent::state::AgentState;
+use secaudit_conversation::{SessionListItem, SessionPreviewRole};
 use secaudit_core::Config;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
 use super::commands::{Command, UserInput};
-use super::{ChatRequest, WorkerCommand, WorkerEvent, build_worker_session, parse_user_input};
+use super::{
+    ChatRequest, DisplayMessage, DisplayRole, SessionSnapshot, WorkerCommand, WorkerEvent,
+    build_worker_conversation, parse_user_input, start_worker_session,
+};
 use event_format::{summarize_tool_args, summarize_tool_result};
 use markdown::render_markdown_lines;
 use timestamp::{format_absolute_timestamp, now_timestamp};
@@ -51,9 +55,10 @@ const DEFAULT_VIEWPORT_HEIGHT: u16 = 10;
 const MAX_INPUT_LINES: usize = 6;
 
 const WELCOME_MSG: &str = "secaudit -- 安全代码审计 Agent（TUI）";
-const HELP_HINT: &str = "输入审计指令后回车，命令：/help /clear /status /tools /exit，Ctrl+D 退出";
+const HELP_HINT: &str = "输入审计指令后回车，命令：/help /new /sessions /session <id|序号> /status /tools /exit，Ctrl+D 退出";
 
-const FOOTER_HINT: &str = "F1 帮助  Ctrl+L 切换事件面板  Ctrl+J/K 事件滚动  Tab 补全  Ctrl+P/N 历史  Shift+Enter 多行  Enter 发送  Ctrl+D 退出";
+const FOOTER_HINT: &str =
+    "F1 帮助  Ctrl+L 事件面板  Ctrl+J/K 事件滚动  Tab 补全  Ctrl+P/N 历史  Enter 发送  Ctrl+D 退出";
 
 const HELP_TEXT: &[&str] = &[
     "快捷键",
@@ -70,19 +75,34 @@ const HELP_TEXT: &[&str] = &[
     "  Tab                  命令补全（以 / 开头）",
     "",
     "命令",
-    "  /help   显示帮助",
-    "  /clear  清空会话与日志",
-    "  /status 显示当前状态",
-    "  /tools  列出工具",
-    "  /exit   退出",
+    "  /help          显示帮助",
+    "  /new           新建会话并清空当前视图",
+    "  /clear         /new 的兼容别名",
+    "  /sessions      列出当前项目会话",
+    "  /session <id|序号>  切换到指定会话",
+    "  /status        显示当前状态",
+    "  /tools         列出工具",
+    "  /exit          退出",
 ];
 
 const HELP_EVENT_SUMMARY: &str = "已显示帮助。";
 const STATUS_EVENT_SUMMARY: &str = "已显示当前状态。";
 const TOOLS_EVENT_SUMMARY: &str = "已显示可用工具。";
-const CLEAR_EVENT_SUMMARY: &str = "对话历史与事件已清空。";
+const CLEAR_EVENT_SUMMARY: &str = "已开启新会话，当前视图与事件已清空。";
+const SESSIONS_EVENT_SUMMARY: &str = "已显示会话列表。";
+const SWITCH_SESSION_EVENT_SUMMARY: &str = "已切换会话。";
+const SESSION_PREVIEW_MAX_CHARS: usize = 96;
 
-const COMMAND_CANDIDATES: [&str; 5] = ["/help", "/clear", "/status", "/tools", "/exit"];
+const COMMAND_CANDIDATES: [&str; 8] = [
+    "/help",
+    "/new",
+    "/clear",
+    "/sessions",
+    "/session ",
+    "/status",
+    "/tools",
+    "/exit",
+];
 
 const EVENT_PANEL_WIDTH_EXPANDED: u16 = 34;
 const EVENT_PANEL_WIDTH_COLLAPSED: u16 = 1;
@@ -513,6 +533,7 @@ struct TuiApp {
     busy: bool,
     show_help: bool,
     tool_names: Vec<String>,
+    current_session_id: Option<String>,
     message_count: usize,
     last_state_label: String,
     chat_scroll: u16,
@@ -535,6 +556,7 @@ impl TuiApp {
             busy: false,
             show_help: false,
             tool_names: Vec::new(),
+            current_session_id: None,
             message_count: 0,
             last_state_label: "就绪".to_owned(),
             chat_scroll: 0,
@@ -641,10 +663,34 @@ impl TuiApp {
         self.chat_scroll = 0;
         self.event_scroll = 0;
         self.follow_chat = true;
+        self.message_count = 0;
         self.push_system_block(
             &format!("{CLEAR_EVENT_SUMMARY}\n{HELP_HINT}"),
             CLEAR_EVENT_SUMMARY,
         );
+    }
+
+    fn load_session_snapshot(&mut self, snapshot: SessionSnapshot, summary: &str) {
+        self.messages.clear();
+        self.events.clear();
+        self.chat_scroll = 0;
+        self.event_scroll = 0;
+        self.follow_chat = true;
+        self.current_session_id = Some(snapshot.id);
+        self.message_count = snapshot.message_count;
+
+        for message in &snapshot.messages {
+            self.push_display_message(message);
+        }
+
+        self.push_system_block(summary, SWITCH_SESSION_EVENT_SUMMARY);
+    }
+
+    fn push_display_message(&mut self, message: &DisplayMessage) {
+        match message.role {
+            DisplayRole::User => self.push_user(&message.content),
+            DisplayRole::Agent => self.push_agent(&message.content),
+        }
     }
 
     fn show_help_text(&mut self) {
@@ -658,13 +704,47 @@ impl TuiApp {
             "Agent 空闲"
         };
         let status = format!(
-            "工作目录：{}\n当前状态：{}\n对话消息数：{}\n{}",
+            "工作目录：{}\n当前会话：{}\n当前状态：{}\n对话消息数：{}\n{}",
             self.work_dir.display(),
+            self.current_session_id.as_deref().unwrap_or("尚未就绪"),
             self.last_state_label,
             self.message_count,
             activity
         );
         self.push_system_block(&status, STATUS_EVENT_SUMMARY);
+    }
+
+    fn show_sessions(&mut self, sessions: &[SessionListItem]) {
+        if sessions.is_empty() {
+            self.push_system_block("当前项目没有历史会话。", SESSIONS_EVENT_SUMMARY);
+            return;
+        }
+
+        let mut lines = vec!["当前项目会话：".to_owned()];
+        for (index, item) in sessions.iter().enumerate() {
+            let session = &item.metadata;
+            let current = if self
+                .current_session_id
+                .as_deref()
+                .is_some_and(|id| id == session.session_id)
+            {
+                "*"
+            } else {
+                " "
+            };
+            let display_index = index + 1;
+            lines.push(format!(
+                "{current} [{display_index}] {}  {}  messages={}  updated={}",
+                short_session_id(Some(&session.session_id)),
+                session.status,
+                session.message_count,
+                session.updated_at
+            ));
+            lines.push(format!("    预览：{}", session_preview_text(item)));
+        }
+        lines.push("使用 /session <序号> 或 /session <id> 切换会话，/new 新建会话。".to_owned());
+
+        self.push_system_block(&lines.join("\n"), SESSIONS_EVENT_SUMMARY);
     }
 
     fn show_tools(&mut self) {
@@ -780,20 +860,16 @@ impl TuiApp {
         let activity = if self.busy { "Running" } else { "Idle" };
         let metrics = Paragraph::new(vec![
             Line::from(vec![
+                Span::styled("Session ", Style::default().fg(Color::Gray)),
+                Span::raw(short_session_id(self.current_session_id.as_deref())),
+            ]),
+            Line::from(vec![
                 Span::styled("Agent   ", Style::default().fg(Color::Gray)),
                 Span::raw(activity),
             ]),
             Line::from(vec![
                 Span::styled("State   ", Style::default().fg(Color::Gray)),
                 Span::raw(self.last_state_label.clone()),
-            ]),
-            Line::from(vec![
-                Span::styled("Event   ", Style::default().fg(Color::Gray)),
-                Span::raw(if self.event_panel_collapsed {
-                    "Collapsed"
-                } else {
-                    "Expanded"
-                }),
             ]),
         ])
         .block(Block::default().borders(Borders::ALL).title("Runtime"));
@@ -1017,6 +1093,41 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
 }
 
+fn short_session_id(session_id: Option<&str>) -> String {
+    session_id.map_or_else(
+        || "pending".to_owned(),
+        |id| {
+            id.char_indices()
+                .nth(8)
+                .map_or_else(|| id.to_owned(), |(idx, _)| id[..idx].to_owned())
+        },
+    )
+}
+
+fn session_preview_text(item: &SessionListItem) -> String {
+    let Some(preview) = &item.preview else {
+        return "无用户/助手消息".to_owned();
+    };
+    let role = match preview.role {
+        SessionPreviewRole::User => "User",
+        SessionPreviewRole::Assistant => "Assistant",
+    };
+    format!(
+        "{role}: {}",
+        truncate_chars(&preview.content, SESSION_PREVIEW_MAX_CHARS)
+    )
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    const ELLIPSIS: &str = "...";
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+
+    let truncated = text.chars().take(max_chars).collect::<String>();
+    format!("{truncated}{ELLIPSIS}")
+}
+
 fn cli_confirm(
     event_tx: mpsc::UnboundedSender<WorkerEvent>,
 ) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
@@ -1087,35 +1198,83 @@ async fn run_worker(
         .map(str::to_owned)
         .collect::<Vec<_>>();
 
-    let mut session = build_worker_session(work_dir.as_path());
+    let conversation = match build_worker_conversation() {
+        Ok(service) => service,
+        Err(error) => {
+            let _ = event_tx.send(WorkerEvent::Error(format!("会话服务初始化失败：{error}")));
+            return;
+        }
+    };
+    let mut session = match start_worker_session(&conversation, work_dir.as_path()) {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = event_tx.send(WorkerEvent::Error(format!("会话创建失败：{error}")));
+            return;
+        }
+    };
 
     let _ = event_tx.send(WorkerEvent::Ready {
         tool_names,
-        message_count: session.messages().len(),
+        session: SessionSnapshot::from_managed(&session),
     });
 
     while let Some(command) = command_rx.recv().await {
         match command {
             WorkerCommand::Chat(request) => {
-                let response = agent
-                    .chat(&mut session, &request.input)
+                let response = conversation
+                    .chat(&mut agent, &mut session, &request.input)
                     .await
                     .map_err(|e| format!("{e}"));
 
                 let _ = event_tx.send(WorkerEvent::ChatDone {
                     response,
-                    message_count: session.messages().len(),
+                    message_count: session.session().messages().len(),
                 });
             }
-            WorkerCommand::ClearSession => {
-                session.clear();
-                let _ = event_tx.send(WorkerEvent::Status {
-                    message_count: session.messages().len(),
-                });
+            WorkerCommand::NewSession => {
+                match start_worker_session(&conversation, work_dir.as_path()) {
+                    Ok(new_session) => {
+                        session = new_session;
+                        let _ = event_tx.send(WorkerEvent::NewSession {
+                            session: SessionSnapshot::from_managed(&session),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = event_tx.send(WorkerEvent::Error(format!("新建会话失败：{error}")));
+                    }
+                }
+            }
+            WorkerCommand::ListSessions => {
+                let sessions = conversation
+                    .list_sessions_with_preview(work_dir.as_path())
+                    .map_err(|e| format!("{e}"));
+                let _ = event_tx.send(WorkerEvent::SessionList { sessions });
+            }
+            WorkerCommand::SwitchSession { selector } => {
+                match super::resolve_session_selector(&conversation, work_dir.as_path(), &selector)
+                {
+                    Ok(session_id) => {
+                        match conversation.load_session(work_dir.as_path(), &session_id) {
+                            Ok(loaded_session) => {
+                                session = loaded_session;
+                                let _ = event_tx.send(WorkerEvent::SessionLoaded {
+                                    session: SessionSnapshot::from_managed(&session),
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx
+                                    .send(WorkerEvent::Error(format!("切换会话失败：{error}")));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = event_tx.send(WorkerEvent::Error(format!("切换会话失败：{error}")));
+                    }
+                }
             }
             WorkerCommand::QueryStatus => {
                 let _ = event_tx.send(WorkerEvent::Status {
-                    message_count: session.messages().len(),
+                    message_count: session.session().messages().len(),
                 });
             }
             WorkerCommand::Shutdown => {
@@ -1130,10 +1289,11 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
         match worker_event {
             WorkerEvent::Ready {
                 tool_names,
-                message_count,
+                session,
             } => {
                 app.tool_names = tool_names;
-                app.message_count = message_count;
+                app.current_session_id = Some(session.id);
+                app.message_count = session.message_count;
                 app.push_system("Agent 已就绪。");
             }
             WorkerEvent::State(state) => app.push_state(&state),
@@ -1153,6 +1313,23 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             }
             WorkerEvent::Status { message_count } => {
                 app.message_count = message_count;
+            }
+            WorkerEvent::NewSession { session } => {
+                app.clear_messages_and_events();
+                app.current_session_id = Some(session.id);
+                app.message_count = session.message_count;
+            }
+            WorkerEvent::SessionLoaded { session } => {
+                let session_id = session.id.clone();
+                app.load_session_snapshot(session, &format!("已切换到会话：{session_id}"));
+            }
+            WorkerEvent::SessionList { sessions } => match sessions {
+                Ok(sessions) => app.show_sessions(&sessions),
+                Err(error) => app.push_error(&format!("会话列表读取失败：{error}")),
+            },
+            WorkerEvent::Error(message) => {
+                app.busy = false;
+                app.push_error(&message);
             }
         }
     }
@@ -1337,12 +1514,25 @@ fn handle_command(
 ) {
     match command {
         Command::Help => app.show_help_text(),
-        Command::Clear => {
-            app.clear_messages_and_events();
-            if command_tx.send(WorkerCommand::ClearSession).is_err() {
-                app.push_error("无法清空 Agent 会话。");
+        Command::NewSession => {
+            if command_tx.send(WorkerCommand::NewSession).is_err() {
+                app.push_error("无法新建 Agent 会话。");
+            } else {
+                app.busy = false;
             }
-            app.message_count = 0;
+        }
+        Command::ListSessions => {
+            if command_tx.send(WorkerCommand::ListSessions).is_err() {
+                app.push_error("无法读取会话列表。");
+            }
+        }
+        Command::SwitchSession { selector } => {
+            if command_tx
+                .send(WorkerCommand::SwitchSession { selector })
+                .is_err()
+            {
+                app.push_error("无法切换 Agent 会话。");
+            }
         }
         Command::Status => {
             if command_tx.send(WorkerCommand::QueryStatus).is_err() {
@@ -1361,7 +1551,10 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    use super::{HELP_EVENT_SUMMARY, HELP_TEXT, InputBuffer, TuiApp, is_quit_key};
+    use super::{
+        DisplayMessage, DisplayRole, HELP_EVENT_SUMMARY, HELP_TEXT, InputBuffer, SessionSnapshot,
+        TuiApp, is_quit_key,
+    };
 
     #[test]
     fn help_command_uses_single_message() {
@@ -1391,6 +1584,39 @@ mod tests {
             app.events.last().map(|event| event.text.as_str()),
             Some(HELP_EVENT_SUMMARY),
             "帮助事件应使用摘要文本"
+        );
+    }
+
+    #[test]
+    fn session_snapshot_rebuilds_chat_messages() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let snapshot = SessionSnapshot {
+            id: "session-123".to_owned(),
+            message_count: 2,
+            messages: vec![
+                DisplayMessage {
+                    role: DisplayRole::User,
+                    content: "hello".to_owned(),
+                },
+                DisplayMessage {
+                    role: DisplayRole::Agent,
+                    content: "world".to_owned(),
+                },
+            ],
+        };
+
+        app.load_session_snapshot(snapshot, "已切换到会话：session-123");
+
+        assert_eq!(app.current_session_id.as_deref(), Some("session-123"));
+        assert_eq!(app.message_count, 2);
+        assert_eq!(app.messages.len(), 3);
+        assert_eq!(
+            app.messages
+                .iter()
+                .rev()
+                .nth(1)
+                .map(|message| message.content.as_str()),
+            Some("world")
         );
     }
 

@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use secaudit_agent::{Agent, ChatMessage, Session, TokenUsage};
+use secaudit_conversation::SessionManagementInfo;
 use serde::Serialize;
 
 /// 工具调用记录。
@@ -249,6 +250,9 @@ pub enum HeadlessResponse {
         work_dir: String,
         /// 确认模式。
         confirm_mode: String,
+        /// 会话管理信息。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_management: Option<SessionManagementInfo>,
     },
     /// 执行失败。
     Error {
@@ -268,6 +272,9 @@ pub enum HeadlessResponse {
         work_dir: String,
         /// 确认模式。
         confirm_mode: String,
+        /// 会话管理信息。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_management: Option<SessionManagementInfo>,
     },
 }
 
@@ -288,6 +295,8 @@ pub struct HeadlessResponseContext {
     pub work_dir: String,
     /// 确认模式。
     pub confirm_mode: String,
+    /// 会话管理信息。
+    pub session_management: Option<SessionManagementInfo>,
 }
 
 impl HeadlessResponse {
@@ -302,6 +311,7 @@ impl HeadlessResponse {
             duration_ms,
             work_dir,
             confirm_mode,
+            session_management,
         } = context;
         Self::Success {
             final_message,
@@ -312,6 +322,7 @@ impl HeadlessResponse {
             duration_ms,
             work_dir,
             confirm_mode,
+            session_management,
         }
     }
 
@@ -326,6 +337,7 @@ impl HeadlessResponse {
             duration_ms,
             work_dir,
             confirm_mode,
+            session_management,
         } = context;
         Self::Error {
             error,
@@ -336,6 +348,7 @@ impl HeadlessResponse {
             duration_ms,
             work_dir,
             confirm_mode,
+            session_management,
         }
     }
 }
@@ -404,12 +417,13 @@ mod tests {
                 duration_ms: 10,
                 work_dir: "/tmp/project".to_owned(),
                 confirm_mode: "deny".to_owned(),
+                session_management: None,
             },
         );
 
-        let json = serde_json::to_value(response);
-        assert!(json.is_ok());
-        if let Ok(value) = json {
+        let json = serde_json::to_value(response).ok();
+        assert!(json.is_some());
+        if let Some(value) = json {
             assert_eq!(
                 value.get("status").and_then(serde_json::Value::as_str),
                 Some("success")

@@ -44,7 +44,8 @@ just run path/to/file.java -f json -o trajectory.json
   "metrics": {},
   "duration_ms": 0,
   "work_dir": "...",
-  "confirm_mode": "deny"
+  "confirm_mode": "deny",
+  "session_management": {}
 }
 ```
 
@@ -81,6 +82,7 @@ just run path/to/file.java -f json -o trajectory.json
 - `duration_ms`: 本次请求总耗时
 - `work_dir`: 工作目录
 - `confirm_mode`: `deny|allow|ask`
+- `session_management`: 可选会话管理信息，包含 `project_key`、`status`、`session_path`、`storage_root`；评估平台可以忽略
 
 ## 4. 数据结构（trajectory 输出）
 
