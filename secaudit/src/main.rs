@@ -20,8 +20,10 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
 use secaudit_agent::strategy;
-use secaudit_agent::{Agent, Session, to_multi_turn_sample};
+use secaudit_agent::{Agent, to_multi_turn_sample};
+use secaudit_conversation::{ConversationService, SessionMetadata};
 use secaudit_core::Config;
+use serde::Serialize;
 
 use crate::headless::{
     HeadlessResponse, HeadlessResponseContext, SessionSnapshot, TraceRecorder, TurnRecord,
@@ -71,6 +73,18 @@ struct Cli {
     /// chat 模式输出格式：json（默认）或 text
     #[arg(long, default_value = OUTPUT_JSON)]
     output_format: OutputFormat,
+
+    /// chat 模式：恢复并继续指定会话 ID。
+    #[arg(long)]
+    session: Option<String>,
+
+    /// chat 模式：列出当前项目下的历史会话，不调用 LLM。
+    #[arg(long, conflicts_with = "archive_session")]
+    list_sessions: bool,
+
+    /// chat 模式：归档指定会话 ID，不调用 LLM。
+    #[arg(long, value_name = "ID", conflicts_with = "list_sessions")]
+    archive_session: Option<String>,
 }
 
 /// 支持的文件扩展名到语言名的映射
@@ -103,6 +117,18 @@ const EXIT_USER_DENIED: i32 = 130;
 
 /// tool 调用拒绝的错误消息片段
 const MSG_USER_DENIED: &str = "用户拒绝执行该命令";
+
+#[derive(Serialize)]
+struct SessionListOutput<'a> {
+    status: &'static str,
+    sessions: &'a [SessionMetadata],
+}
+
+#[derive(Serialize)]
+struct ArchiveSessionOutput<'a> {
+    status: &'static str,
+    session: &'a SessionMetadata,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Mode {
@@ -146,20 +172,37 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    // 加载配置
-    let config = match Config::from_env() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}: {e}", "配置错误".red().bold());
-            process::exit(1);
+    if cli.mode == Mode::Chat || cli.list_sessions || cli.archive_session.is_some() {
+        if handle_headless_session_management(&cli) {
+            return;
         }
-    };
 
-    if cli.mode == Mode::Chat {
+        // 加载配置
+        let config = match Config::from_env() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{}: {e}", "配置错误".red().bold());
+                process::exit(1);
+            }
+        };
         run_headless_chat(&cli, config).await;
     } else if let Some(target) = &cli.target {
+        let config = match Config::from_env() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{}: {e}", "配置错误".red().bold());
+                process::exit(1);
+            }
+        };
         run_single_file(&cli, config, target).await;
     } else {
+        let config = match Config::from_env() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{}: {e}", "配置错误".red().bold());
+                process::exit(1);
+            }
+        };
         run_interactive(config).await;
     }
 }
@@ -255,6 +298,13 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
     let work_dir = current_work_dir();
     let work_dir_display = work_dir.display().to_string();
     let inputs = resolve_chat_messages(cli);
+    let conversation = match ConversationService::with_default_storage() {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!("{}: {error}", "会话错误".red().bold());
+            process::exit(1);
+        }
+    };
 
     let recorder = TraceRecorder::new();
     let confirm_mode = cli.confirm_mode;
@@ -263,7 +313,13 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
 
     let mut agent = Agent::new(config, work_dir.clone(), confirm);
     recorder.attach(&mut agent);
-    let mut session = Session::new(work_dir);
+    let mut managed_session = match load_or_start_session(&conversation, &work_dir, cli) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{}: {error}", "会话错误".red().bold());
+            process::exit(1);
+        }
+    };
 
     let mut turns = Vec::new();
     let start = Instant::now();
@@ -272,7 +328,10 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
 
     for (index, user_message) in inputs.iter().enumerate() {
         let turn_start = Instant::now();
-        match agent.chat(&mut session, user_message).await {
+        match conversation
+            .chat(&mut agent, &mut managed_session, user_message)
+            .await
+        {
             Ok(message) => {
                 let duration_ms = turn_start.elapsed().as_millis() as u64;
                 final_message.clone_from(&message);
@@ -300,8 +359,9 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let trace = recorder.snapshot();
-    let session_snapshot = SessionSnapshot::from_session(&session);
+    let session_snapshot = SessionSnapshot::from_session(managed_session.session());
     let metrics = collect_session_metrics(&session_snapshot.messages);
+    let session_management = Some(conversation.management_info(&managed_session));
 
     let context = HeadlessResponseContext {
         turns,
@@ -311,6 +371,7 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
         duration_ms,
         work_dir: work_dir_display,
         confirm_mode: confirm_mode_name,
+        session_management,
     };
 
     let response = if let Some(error) = &failure {
@@ -326,6 +387,112 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
             process::exit(EXIT_USER_DENIED);
         }
         process::exit(1);
+    }
+}
+
+fn handle_headless_session_management(cli: &Cli) -> bool {
+    if !cli.list_sessions && cli.archive_session.is_none() {
+        return false;
+    }
+
+    let work_dir = current_work_dir();
+    let service = match ConversationService::with_default_storage() {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!("{}: {error}", "会话错误".red().bold());
+            process::exit(1);
+        }
+    };
+
+    if cli.list_sessions {
+        match service.list_sessions(&work_dir) {
+            Ok(sessions) => print_session_list(cli.output_format, &sessions),
+            Err(error) => {
+                eprintln!("{}: {error}", "会话错误".red().bold());
+                process::exit(1);
+            }
+        }
+    }
+
+    if let Some(session_id) = &cli.archive_session {
+        match service.archive_session(&work_dir, session_id) {
+            Ok(metadata) => print_archived_session(cli.output_format, &metadata),
+            Err(error) => {
+                eprintln!("{}: {error}", "会话错误".red().bold());
+                process::exit(1);
+            }
+        }
+    }
+
+    true
+}
+
+fn load_or_start_session(
+    service: &ConversationService,
+    work_dir: &Path,
+    cli: &Cli,
+) -> secaudit_conversation::Result<secaudit_conversation::ManagedSession> {
+    if let Some(session_id) = &cli.session {
+        service.load_session(work_dir, session_id)
+    } else {
+        service.start_session(work_dir)
+    }
+}
+
+fn print_session_list(output_format: OutputFormat, sessions: &[SessionMetadata]) {
+    match output_format {
+        OutputFormat::Json => {
+            let output = SessionListOutput {
+                status: "success",
+                sessions,
+            };
+            print_json_or_exit(&output);
+        }
+        OutputFormat::Text => {
+            println!("{}", "secaudit chat 会话列表".green().bold());
+            if sessions.is_empty() {
+                println!("当前项目没有历史会话。");
+                return;
+            }
+            for session in sessions {
+                println!(
+                    "{}  {}  {}  messages={}  {}",
+                    session.session_id,
+                    session.status,
+                    session.updated_at,
+                    session.message_count,
+                    session.title
+                );
+            }
+        }
+    }
+}
+
+fn print_archived_session(output_format: OutputFormat, session: &SessionMetadata) {
+    match output_format {
+        OutputFormat::Json => {
+            let output = ArchiveSessionOutput {
+                status: "success",
+                session,
+            };
+            print_json_or_exit(&output);
+        }
+        OutputFormat::Text => {
+            println!("{}", "secaudit chat 会话已归档".green().bold());
+            println!("会话：{}", session.session_id);
+            println!("状态：{}", session.status);
+            println!("更新时间：{}", session.updated_at);
+        }
+    }
+}
+
+fn print_json_or_exit<T: Serialize>(value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => println!("{json}"),
+        Err(error) => {
+            eprintln!("{}: JSON 序列化失败：{error}", "错误".red().bold());
+            process::exit(1);
+        }
     }
 }
 
@@ -424,6 +591,7 @@ fn print_headless_response(output_format: OutputFormat, response: &HeadlessRespo
                 work_dir,
                 confirm_mode,
                 turns,
+                session_management,
                 ..
             } => {
                 println!("{}", "secaudit chat 执行成功".green().bold());
@@ -431,6 +599,10 @@ fn print_headless_response(output_format: OutputFormat, response: &HeadlessRespo
                 println!("确认模式：{confirm_mode}");
                 println!("轮次：{}", turns.len());
                 println!("耗时：{duration_ms} ms");
+                if let Some(info) = session_management {
+                    println!("会话：{} ({})", info.project_key, info.status);
+                    println!("会话文件：{}", info.session_path);
+                }
                 output::cli::print_separator();
                 println!("{final_message}");
             }
@@ -440,6 +612,7 @@ fn print_headless_response(output_format: OutputFormat, response: &HeadlessRespo
                 work_dir,
                 confirm_mode,
                 turns,
+                session_management,
                 ..
             } => {
                 eprintln!("{}", "secaudit chat 执行失败".red().bold());
@@ -447,6 +620,10 @@ fn print_headless_response(output_format: OutputFormat, response: &HeadlessRespo
                 eprintln!("确认模式：{confirm_mode}");
                 eprintln!("轮次：{}", turns.len());
                 eprintln!("耗时：{duration_ms} ms");
+                if let Some(info) = session_management {
+                    eprintln!("会话：{} ({})", info.project_key, info.status);
+                    eprintln!("会话文件：{}", info.session_path);
+                }
                 eprintln!("错误：{error}");
             }
         },
@@ -512,6 +689,9 @@ mod tests {
             messages_json: Some("[\"a\",\"b\"]".to_owned()),
             confirm_mode: ConfirmMode::Deny,
             output_format: OutputFormat::Json,
+            session: None,
+            list_sessions: false,
+            archive_session: None,
         };
 
         assert_eq!(resolve_chat_messages(&cli), vec!["a", "b"]);

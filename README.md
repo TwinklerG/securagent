@@ -17,7 +17,8 @@ securagent/
     ├── secaudit-llm/          # 通用 LLM 客户端与对话类型
     ├── secaudit-tools/        # 工具系统（Tool trait + 内置工具）
     │   └── src/tools/         # read/list/search/find/write/exec/semgrep/deps/nvd
-    └── secaudit-agent/        # 推理引擎（ReAct/Reflexion + Session + Prompt + Trajectory）
+    ├── secaudit-agent/        # 推理引擎（ReAct/Reflexion + Session + Prompt + Trajectory）
+    └── secaudit-conversation/ # 会话服务、历史持久化与滑动窗口
 ```
 
 ## 快速开始
@@ -79,6 +80,11 @@ just run-chat --message "运行 cargo clippy 并总结结果" --confirm-mode ask
 
 # 文本输出（便于人读）
 just run-chat --message "审计当前目录" --output-format text
+
+# 会话管理：列出、恢复、归档
+just run-chat --list-sessions
+just run-chat --session <session-id> --message "继续上一轮审计"
+just run-chat --archive-session <session-id>
 ```
 
 非交互 chat 适用于外部 agent 或脚本调用，执行一次完整对话后输出结构化结果：
@@ -91,8 +97,10 @@ just run-chat --message "审计当前目录" --output-format text
 - `session`：`id`、`created_at`、`messages`（可直接用于评估）
 - `metrics`：`token_usage`（`prompt_tokens`、`completion_tokens`、`total_tokens`）
 - `duration_ms`、`work_dir`、`confirm_mode`
+- `session_management`：可选会话管理信息（项目键、会话文件、状态、存储根目录）
 
 评估输入契约文档见：`docs/contracts/agent-evaluation-contract.md`
+持久化与历史对话规范见：`docs/conversation-persistence.md`
 
 ### 批量评估（演示样本）
 

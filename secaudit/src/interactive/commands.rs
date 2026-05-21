@@ -12,10 +12,12 @@ pub enum UserInput {
 }
 
 /// 内置命令。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
-    Clear,
+    NewSession,
+    ListSessions,
+    SwitchSession { selector: String },
     Status,
     Tools,
     Exit,
@@ -31,11 +33,12 @@ pub fn parse(input: &str) -> UserInput {
 
     let command = match trimmed {
         "/help" => Some(Command::Help),
-        "/clear" => Some(Command::Clear),
+        "/clear" | "/new" => Some(Command::NewSession),
+        "/sessions" => Some(Command::ListSessions),
         "/status" => Some(Command::Status),
         "/tools" => Some(Command::Tools),
         "/exit" => Some(Command::Exit),
-        _ => None,
+        _ => parse_session_command(trimmed),
     };
 
     if let Some(cmd) = command {
@@ -43,6 +46,16 @@ pub fn parse(input: &str) -> UserInput {
     } else {
         UserInput::Chat(trimmed.to_owned())
     }
+}
+
+fn parse_session_command(trimmed: &str) -> Option<Command> {
+    let selector = trimmed.strip_prefix("/session ")?.trim();
+    if selector.is_empty() {
+        return None;
+    }
+    Some(Command::SwitchSession {
+        selector: selector.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -57,6 +70,32 @@ mod tests {
     #[test]
     fn parse_help_command() {
         assert_eq!(parse("/help"), UserInput::Command(Command::Help));
+    }
+
+    #[test]
+    fn parse_new_session_commands() {
+        assert_eq!(parse("/new"), UserInput::Command(Command::NewSession));
+        assert_eq!(parse("/clear"), UserInput::Command(Command::NewSession));
+    }
+
+    #[test]
+    fn parse_session_commands() {
+        assert_eq!(
+            parse("/sessions"),
+            UserInput::Command(Command::ListSessions)
+        );
+        assert_eq!(
+            parse("/session abc-123"),
+            UserInput::Command(Command::SwitchSession {
+                selector: "abc-123".to_owned()
+            })
+        );
+        assert_eq!(
+            parse("/session 2"),
+            UserInput::Command(Command::SwitchSession {
+                selector: "2".to_owned()
+            })
+        );
     }
 
     #[test]

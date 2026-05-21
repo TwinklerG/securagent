@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 secaudit-agent = { path = "../crates/secaudit-agent" }
+secaudit-conversation = { path = "../crates/secaudit-conversation" }
 secaudit-core = { path = "../crates/secaudit-core" }
 clap = { version = "4", features = ["derive"] }
 colored = "3"
@@ -19,6 +20,9 @@ tokio.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
