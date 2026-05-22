@@ -19,7 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -542,6 +544,9 @@ struct TuiApp {
     event_scroll: u16,
     event_viewport_height: u16,
     event_panel_collapsed: bool,
+    /// 当前流式输出的 agent 消息在 `messages` 中的索引。
+    /// 为 None 表示尚未开始流式输出；ChatDone 后归零。
+    streaming_index: Option<usize>,
 }
 
 impl TuiApp {
@@ -565,6 +570,7 @@ impl TuiApp {
             event_scroll: 0,
             event_viewport_height: DEFAULT_VIEWPORT_HEIGHT,
             event_panel_collapsed: false,
+            streaming_index: None,
         };
 
         app.push_system(
@@ -622,6 +628,66 @@ impl TuiApp {
         self.push_message(MessageRole::Agent, text);
     }
 
+    /// 把流式 delta 追加到正在输出的 agent 消息。第一次调用会创建一条新消息。
+    fn append_streaming_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+
+        if self.streaming_index.is_none() {
+            self.messages.push(ChatMessage {
+                timestamp: now_timestamp(),
+                role: MessageRole::Agent,
+                content: String::new(),
+            });
+            if self.messages.len() > MAX_MESSAGE_ITEMS {
+                let overflow = self.messages.len().saturating_sub(MAX_MESSAGE_ITEMS);
+                self.messages.drain(0..overflow);
+            }
+            self.streaming_index = Some(self.messages.len().saturating_sub(1));
+        }
+
+        if let Some(idx) = self.streaming_index
+            && let Some(msg) = self.messages.get_mut(idx)
+        {
+            msg.content.push_str(delta);
+        }
+
+        if self.follow_chat {
+            self.scroll_chat_to_bottom();
+        }
+    }
+
+    /// 流式输出结束：信任已累积的 delta 内容；若一个 delta 都没收到（如错误提前返回），
+    /// 退回到 `final_text`；若两者都为空，移除占位消息。
+    fn finalize_streaming(&mut self, final_text: &str) {
+        match self.streaming_index.take() {
+            Some(idx) => {
+                let remove = self.messages.get_mut(idx).is_some_and(|msg| {
+                    if msg.content.is_empty() {
+                        if final_text.is_empty() {
+                            true
+                        } else {
+                            msg.content.push_str(final_text);
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                });
+                if remove {
+                    self.messages.remove(idx);
+                }
+                if self.follow_chat {
+                    self.scroll_chat_to_bottom();
+                }
+            }
+            None => {
+                self.push_agent(final_text);
+            }
+        }
+    }
+
     fn push_error(&mut self, text: &str) {
         self.push_message(MessageRole::Error, text);
         self.push_event(EventKind::Error, text.to_owned());
@@ -663,6 +729,7 @@ impl TuiApp {
         self.chat_scroll = 0;
         self.event_scroll = 0;
         self.follow_chat = true;
+        self.streaming_index = None;
         self.message_count = 0;
         self.push_system_block(
             &format!("{CLEAR_EVENT_SUMMARY}\n{HELP_HINT}"),
@@ -1165,6 +1232,12 @@ fn bind_agent_callbacks(agent: &mut Agent, event_tx: &mpsc::UnboundedSender<Work
     }
     {
         let tx = event_tx.clone();
+        agent.on_token(move |delta| {
+            let _ = tx.send(WorkerEvent::Delta(delta.to_owned()));
+        });
+    }
+    {
+        let tx = event_tx.clone();
         agent.on_tool_call(move |name, args| {
             let _ = tx.send(WorkerEvent::ToolCall {
                 name: name.to_owned(),
@@ -1298,6 +1371,7 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             }
             WorkerEvent::State(state) => app.push_state(&state),
             WorkerEvent::Think(text) => app.push_think(&text),
+            WorkerEvent::Delta(delta) => app.append_streaming_delta(&delta),
             WorkerEvent::ToolCall { name, args } => app.push_tool_call(&name, &args),
             WorkerEvent::ToolResult { name, result } => app.push_tool_result(&name, &result),
             WorkerEvent::ChatDone {
@@ -1307,8 +1381,11 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                 app.busy = false;
                 app.message_count = message_count;
                 match response {
-                    Ok(text) => app.push_agent(&text),
-                    Err(err) => app.push_error(&format!("Agent 错误：{err}")),
+                    Ok(text) => app.finalize_streaming(&text),
+                    Err(err) => {
+                        app.streaming_index = None;
+                        app.push_error(&format!("Agent 错误：{err}"));
+                    }
                 }
             }
             WorkerEvent::Status { message_count } => {
@@ -1498,6 +1575,7 @@ pub async fn run(config: Config, work_dir: PathBuf) {
 
         if event::poll(POLL_INTERVAL).unwrap_or(false)
             && let Ok(CrosstermEvent::Key(key)) = event::read()
+            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         {
             process_terminal_key(key, &mut app, &command_tx);
         }

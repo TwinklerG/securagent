@@ -10,10 +10,13 @@ use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionTools,
-    CreateChatCompletionRequestArgs, FunctionCall as OpenAIFunctionCall, FunctionObjectArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionStreamOptions, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, CreateChatCompletionStreamResponse,
+    FunctionCall as OpenAIFunctionCall, FunctionObjectArgs,
 };
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// secaudit-llm 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -168,6 +171,112 @@ pub struct ToolDefinition {
     pub description: String,
     /// 参数 JSON Schema
     pub parameters: serde_json::Value,
+}
+
+// ── 流式响应聚合器 ──────────────────────────────────────────────────────────
+
+/// 流式 `tool_call` 分片聚合器（按 `index` 拼接多个 `chunk`）。
+#[derive(Default)]
+struct ToolCallAccumulator {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn into_response(self) -> ToolCallResponse {
+        ToolCallResponse {
+            id: self.id.unwrap_or_default(),
+            r#type: "function".into(),
+            function: FunctionCall {
+                name: self.name.unwrap_or_default(),
+                arguments: self.arguments,
+            },
+        }
+    }
+}
+
+/// 把 `OpenAI` 流式 chunk 序列装配回 `chat` 等价的字段。
+///
+/// 单一职责：消费 `CreateChatCompletionStreamResponse` 序列，按 `index` 拼接
+/// `tool_call` 分片、累加文本与 `usage`，对外仅暴露 `ingest`/`finish`。
+#[derive(Default)]
+struct StreamAggregator {
+    content: String,
+    tool_calls: BTreeMap<u32, ToolCallAccumulator>,
+    usage: Option<TokenUsage>,
+}
+
+impl StreamAggregator {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// 消费一个 chunk。若 chunk 带新增文本，则返回该增量供调用方触发流式回调。
+    fn ingest(&mut self, chunk: CreateChatCompletionStreamResponse) -> Option<String> {
+        if let Some(chunk_usage) = chunk.usage.as_ref() {
+            self.usage = Some(TokenUsage {
+                prompt_tokens: chunk_usage.prompt_tokens.into(),
+                completion_tokens: chunk_usage.completion_tokens.into(),
+                total_tokens: chunk_usage.total_tokens.into(),
+            });
+        }
+
+        let choice = chunk.choices.into_iter().next()?;
+        let delta = choice.delta;
+
+        if let Some(tc_chunks) = delta.tool_calls {
+            for tc in tc_chunks {
+                let entry = self.tool_calls.entry(tc.index).or_default();
+                if let Some(id) = tc.id {
+                    entry.id = Some(id);
+                }
+                if let Some(func) = tc.function {
+                    if let Some(name) = func.name {
+                        entry.name = Some(name);
+                    }
+                    if let Some(args) = func.arguments {
+                        entry.arguments.push_str(&args);
+                    }
+                }
+            }
+        }
+
+        if let Some(text) = delta.content
+            && !text.is_empty()
+        {
+            self.content.push_str(&text);
+            return Some(text);
+        }
+
+        None
+    }
+
+    /// 流结束后产出装配好的 assistant `ChatMessage`。
+    fn finish(self) -> ChatMessage {
+        let content = if self.content.is_empty() {
+            None
+        } else {
+            Some(self.content)
+        };
+        let tool_calls = if self.tool_calls.is_empty() {
+            None
+        } else {
+            Some(
+                self.tool_calls
+                    .into_values()
+                    .map(ToolCallAccumulator::into_response)
+                    .collect(),
+            )
+        };
+        ChatMessage {
+            role: Role::Assistant,
+            content,
+            tool_calls,
+            tool_call_id: None,
+            usage: self.usage,
+        }
+    }
 }
 
 // ── 类型转换（内部） ────────────────────────────────────────────────────────
@@ -377,6 +486,74 @@ impl HttpLlmClient {
             tool_call_id: None,
             usage,
         })
+    }
+
+    /// 流式发送多轮对话请求。
+    ///
+    /// 收到每个文本增量片段时调用 `on_delta` 回调（仅 `content` 增量，不包括 `tool_calls`）。
+    /// 流结束后聚合 `content` / `tool_calls` / `usage` 组装出与 [`Self::chat`] 等价的
+    /// `ChatMessage` 返回，便于上层 `ReAct` 循环复用现有逻辑。
+    ///
+    /// # Errors
+    ///
+    /// 请求构建、API 调用或响应解析失败时返回 [`Error::Llm`]。
+    pub async fn chat_stream<F>(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+        mut on_delta: F,
+    ) -> Result<ChatMessage, Error>
+    where
+        F: FnMut(&str) + Send,
+    {
+        let request_messages: Vec<ChatCompletionRequestMessage> = messages
+            .iter()
+            .map(ChatCompletionRequestMessage::try_from)
+            .collect::<Result<_, _>>()?;
+
+        // 兼容 0.34+ 多字段结构（include_usage / include_obfuscation），
+        // 用 JSON 反序列化避免直接字面量在不同版本下字段数差异引发编译/lint 问题。
+        let stream_opts: ChatCompletionStreamOptions =
+            serde_json::from_str(r#"{"include_usage":true}"#)
+                .map_err(|e| Error::Llm(format!("stream_options 构建失败：{e}")))?;
+
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder
+            .model(&self.model)
+            .messages(request_messages)
+            .stream(true)
+            .stream_options(stream_opts);
+
+        if let Some(tool_defs) = tools
+            && !tool_defs.is_empty()
+        {
+            let chat_tools: Vec<ChatCompletionTools> = tool_defs
+                .iter()
+                .map(ChatCompletionTools::try_from)
+                .collect::<Result<_, _>>()?;
+            builder.tools(chat_tools);
+        }
+
+        let request = builder
+            .build()
+            .map_err(|e| Error::Llm(format!("请求构建失败：{e}")))?;
+
+        let mut stream = self
+            .client
+            .chat()
+            .create_stream(request)
+            .await
+            .map_err(|e| Error::Llm(format!("API 调用失败：{e}")))?;
+
+        let mut aggregator = StreamAggregator::new();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| Error::Llm(format!("流式响应读取失败：{e}")))?;
+            if let Some(delta) = aggregator.ingest(chunk) {
+                on_delta(&delta);
+            }
+        }
+
+        Ok(aggregator.finish())
     }
 
     /// 发送单轮生成请求，返回模型输出文本。

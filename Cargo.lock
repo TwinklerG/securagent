@@ -2506,6 +2506,7 @@ name = "secaudit-llm"
 version = "0.1.0"
 dependencies = [
  "async-openai",
+ "futures-util",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

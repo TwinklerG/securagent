@@ -74,6 +74,34 @@ impl<'a> ReActExecutor<'a> {
         ))
     }
 
+    /// 流式执行一步 ReAct：与 [`Self::step`] 等价，但通过 `on_delta` 回调
+    /// 实时回吐 assistant 文本增量片段。
+    ///
+    /// # Errors
+    ///
+    /// LLM 调用失败时返回 [`Error::Llm`]。
+    pub async fn step_stream<F>(&mut self, on_delta: F) -> Result<StepResult, Error>
+    where
+        F: FnMut(&str) + Send,
+    {
+        let response = self
+            .llm
+            .chat_stream(&self.messages, Some(&self.tool_defs), on_delta)
+            .await?;
+
+        self.messages.push(response.clone());
+
+        if let Some(tool_calls) = &response.tool_calls
+            && !tool_calls.is_empty()
+        {
+            return Ok(StepResult::ToolCalls(tool_calls.clone()));
+        }
+
+        Ok(StepResult::TextResponse(
+            response.content.unwrap_or_default(),
+        ))
+    }
+
     /// 执行工具调用并将结果加入对话历史。
     ///
     /// 工具执行失败时不传播错误，而是将错误信息作为结果返回给 LLM，

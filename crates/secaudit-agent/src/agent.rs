@@ -56,6 +56,8 @@ pub struct AuditReport {
 pub type StateCallback = Box<dyn Fn(&AgentState) + Send + Sync>;
 /// 思考过程回调
 pub type ThinkCallback = Box<dyn Fn(&str) + Send + Sync>;
+/// 流式 token 增量回调（每次仅传当前 chunk 的文本片段）
+pub type TokenCallback = Box<dyn Fn(&str) + Send + Sync>;
 /// 工具调用回调（工具名, 参数）
 pub type ToolCallCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// 工具结果回调（工具名, 结果）
@@ -69,6 +71,8 @@ pub(crate) struct EventBus {
     on_state_change: Option<StateCallback>,
     /// 思考过程回调
     on_think: Option<ThinkCallback>,
+    /// 流式 token 增量回调
+    on_token: Option<TokenCallback>,
     /// 工具调用回调
     on_tool_call: Option<ToolCallCallback>,
     /// 工具结果回调
@@ -88,6 +92,13 @@ impl EventBus {
     pub(crate) fn notify_think(&self, text: &str) {
         if let Some(cb) = &self.on_think {
             cb(text);
+        }
+    }
+
+    /// 通知流式 token 增量
+    pub(crate) fn notify_token(&self, delta: &str) {
+        if let Some(cb) = &self.on_token {
+            cb(delta);
         }
     }
 
@@ -150,7 +161,11 @@ impl Agent {
         let mut tool_rounds = 0u32;
 
         loop {
-            match executor.step().await? {
+            let events_ref = &self.events;
+            let step_result = executor
+                .step_stream(|delta| events_ref.notify_token(delta))
+                .await?;
+            match step_result {
                 StepResult::TextResponse(text) => return Ok(text),
                 StepResult::ToolCalls(calls) => {
                     tool_rounds += 1;
@@ -193,6 +208,7 @@ impl Agent {
                 state: AgentState::Init,
                 on_state_change: None,
                 on_think: None,
+                on_token: None,
                 on_tool_call: None,
                 on_tool_result: None,
             },
@@ -214,6 +230,14 @@ impl Agent {
     /// 设置思考过程回调
     pub fn on_think<F: Fn(&str) + Send + Sync + 'static>(&mut self, cb: F) {
         self.events.on_think = Some(Box::new(cb));
+    }
+
+    /// 设置流式 token 增量回调。
+    ///
+    /// 注册后，Agent 在调用 LLM 时会启用流式响应，每收到一个文本片段就调用 `cb`。
+    /// 适合 TUI/前端实时打字机式渲染。
+    pub fn on_token<F: Fn(&str) + Send + Sync + 'static>(&mut self, cb: F) {
+        self.events.on_token = Some(Box::new(cb));
     }
 
     /// 设置工具调用回调
@@ -278,7 +302,12 @@ impl Agent {
                 executor.push_message(ChatMessage::user(MSG_WRAP_UP));
             }
 
-            let step = executor.step().await?;
+            let step = {
+                let events_ref = &self.events;
+                executor
+                    .step_stream(|delta| events_ref.notify_token(delta))
+                    .await?
+            };
 
             match step {
                 StepResult::ToolCalls(calls) => {
