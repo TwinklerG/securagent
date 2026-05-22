@@ -1,5 +1,6 @@
 //! 文件读取工具 — 读取指定文件内容并附加行号，支持行范围选取。
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -86,12 +87,12 @@ fn format_lines(lines: &[&str], offset: usize, limit: usize) -> String {
 
 #[async_trait]
 impl Tool for ReadFile {
-    fn name(&self) -> &'static str {
-        TOOL_NAME
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        TOOL_DESC
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

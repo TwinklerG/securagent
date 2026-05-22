@@ -252,8 +252,8 @@ impl Agent {
 
     /// 获取可用工具名称列表
     #[must_use]
-    pub fn tool_names(&self) -> Vec<&'static str> {
-        self.tools.iter().map(|t| t.name()).collect()
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.iter().map(|t| t.name().into_owned()).collect()
     }
 
     /// 单轮交互：接收用户消息，Agent 自主使用工具后返回文本回复。

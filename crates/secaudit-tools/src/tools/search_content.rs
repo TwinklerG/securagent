@@ -1,5 +1,6 @@
 //! 正则内容搜索工具 — 在指定目录中递归搜索匹配正则表达式的文件内容。
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,11 @@ const DEFAULT_CONTEXT_LINES: usize = 2;
 
 /// 默认最大结果数
 const DEFAULT_MAX_RESULTS: usize = 50;
+
+// —— 工具元信息 ——
+
+const TOOL_NAME: &str = "search_content";
+const TOOL_DESC: &str = "在指定路径中搜索正则模式，返回匹配行及上下文";
 
 // —— 输出格式 ——
 
@@ -105,12 +111,12 @@ fn format_match(filepath: &str, lines: &[&str], match_line_idx: usize, context: 
 
 #[async_trait]
 impl Tool for SearchContent {
-    fn name(&self) -> &'static str {
-        "search_content"
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        "在指定路径中搜索正则模式，返回匹配行及上下文"
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

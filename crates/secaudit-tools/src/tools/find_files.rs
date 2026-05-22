@@ -1,5 +1,6 @@
 //! 文件查找工具 — 按 glob 模式递归查找匹配的文件路径。
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -15,6 +16,11 @@ use crate::tools::Tool;
 const PARAM_PATTERN: &str = "pattern";
 const PARAM_PATH: &str = "path";
 const PARAM_MAX_RESULTS: &str = "max_results";
+
+// —— 工具元信息 ——
+
+const TOOL_NAME: &str = "find_files";
+const TOOL_DESC: &str = "按 glob 模式查找文件，返回匹配的文件路径列表";
 
 // —— 默认值 ——
 
@@ -37,12 +43,12 @@ impl FindFiles {
 
 #[async_trait]
 impl Tool for FindFiles {
-    fn name(&self) -> &'static str {
-        "find_files"
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        "按 glob 模式查找文件，返回匹配的文件路径列表"
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

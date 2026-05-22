@@ -1,5 +1,6 @@
 //! 命令执行工具 — 在工作目录中安全执行 shell 命令，支持白名单放行与用户确认。
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -158,12 +159,12 @@ fn truncate_output(output: &str) -> String {
 
 #[async_trait]
 impl Tool for ExecuteCommand {
-    fn name(&self) -> &'static str {
-        TOOL_NAME
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        TOOL_DESC
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

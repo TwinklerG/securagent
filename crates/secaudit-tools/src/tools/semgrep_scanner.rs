@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use tokio::process::Command;
 
@@ -13,6 +14,12 @@ use crate::tools::Tool;
 
 const PARAM_PROJECT_PATH: &str = "project_path";
 const PARAM_RULESET: &str = "ruleset";
+
+// —— 工具元信息 ——
+
+const TOOL_NAME: &str = "semgrep_scanner";
+const TOOL_DESC: &str =
+    "调用 Semgrep 静态分析工具扫描项目代码，支持 OWASP Top 10、语言特定等多种规则集";
 
 // —— 默认规则集 ——
 
@@ -91,12 +98,12 @@ impl Default for SemgrepScanner {
 
 #[async_trait]
 impl Tool for SemgrepScanner {
-    fn name(&self) -> &'static str {
-        "semgrep_scanner"
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        "调用 Semgrep 静态分析工具扫描项目代码，支持 OWASP Top 10、语言特定等多种规则集"
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

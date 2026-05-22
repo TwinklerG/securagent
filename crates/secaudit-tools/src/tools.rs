@@ -9,6 +9,7 @@ mod semgrep_scanner;
 pub(crate) mod shared;
 mod write_file;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,10 +36,10 @@ pub type ConfirmFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// 工具名称（唯一标识）
-    fn name(&self) -> &'static str;
+    fn name(&self) -> Cow<'_, str>;
 
     /// 工具描述（供 LLM 理解用途）
-    fn description(&self) -> &'static str;
+    fn description(&self) -> Cow<'_, str>;
 
     /// 工具参数的 JSON Schema
     fn parameters_schema(&self) -> serde_json::Value;

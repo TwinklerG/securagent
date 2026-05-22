@@ -1,5 +1,6 @@
 //! 文件写入工具 — 创建或覆写文件，用于生成修复补丁、PoC 或审计报告。
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -82,12 +83,12 @@ fn find_existing_ancestor(path: &Path) -> Option<PathBuf> {
 
 #[async_trait]
 impl Tool for WriteFile {
-    fn name(&self) -> &'static str {
-        TOOL_NAME
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        TOOL_DESC
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

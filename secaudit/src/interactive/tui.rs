@@ -1265,11 +1265,7 @@ async fn run_worker(
     let mut agent = Agent::new(config, work_dir.clone(), cli_confirm(event_tx.clone()));
     bind_agent_callbacks(&mut agent, &event_tx);
 
-    let tool_names = agent
-        .tool_names()
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let tool_names = agent.tool_names();
 
     let conversation = match build_worker_conversation() {
         Ok(service) => service,

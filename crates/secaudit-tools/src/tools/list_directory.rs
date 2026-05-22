@@ -1,5 +1,6 @@
 //! 目录列出工具 — 列出目录内容，显示文件名、类型和大小，支持递归遍历。
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -171,12 +172,12 @@ async fn list_recursive(
 
 #[async_trait]
 impl Tool for ListDirectory {
-    fn name(&self) -> &'static str {
-        TOOL_NAME
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        TOOL_DESC
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

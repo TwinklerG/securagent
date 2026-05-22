@@ -1,5 +1,6 @@
 //! NVD（国家漏洞数据库）查询工具 — 通过 NVD REST API 查询 CVE 信息。
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -14,6 +15,12 @@ use crate::tools::Tool;
 
 const PARAM_QUERY: &str = "query";
 const PARAM_CWE_ID: &str = "cwe_id";
+
+// —— 工具元信息 ——
+
+const TOOL_NAME: &str = "nvd_lookup";
+const TOOL_DESC: &str =
+    "查询 NVD（国家漏洞数据库）获取 CVE 信息，支持按关键词或 CWE 编号搜索已知漏洞";
 
 // —— API 配置 ——
 
@@ -121,12 +128,12 @@ impl Default for NvdLookup {
 
 #[async_trait]
 impl Tool for NvdLookup {
-    fn name(&self) -> &'static str {
-        "nvd_lookup"
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        "查询 NVD（国家漏洞数据库）获取 CVE 信息，支持按关键词或 CWE 编号搜索已知漏洞"
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {

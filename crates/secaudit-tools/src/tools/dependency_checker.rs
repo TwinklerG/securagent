@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::Path;
 use tokio::process::Command;
@@ -12,6 +13,11 @@ use crate::tools::Tool;
 // —— 参数字段名 ——
 
 const PARAM_PROJECT_PATH: &str = "project_path";
+
+// —— 工具元信息 ——
+
+const TOOL_NAME: &str = "dependency_checker";
+const TOOL_DESC: &str = "检查项目依赖中的已知 CVE 漏洞，支持 Cargo、npm 和 pip 项目";
 
 // —— 包管理锁文件 ——
 
@@ -66,12 +72,12 @@ async fn run_audit(program: &str, args: &[&str], dir: &Path) -> Result<String, E
 
 #[async_trait]
 impl Tool for DependencyChecker {
-    fn name(&self) -> &'static str {
-        "dependency_checker"
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_NAME)
     }
 
-    fn description(&self) -> &'static str {
-        "检查项目依赖中的已知 CVE 漏洞，支持 Cargo、npm 和 pip 项目"
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(TOOL_DESC)
     }
 
     fn parameters_schema(&self) -> Value {
