@@ -14,6 +14,7 @@ mod markdown;
 mod timestamp;
 
 use std::io::{self, Stdout, Write};
+use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -541,8 +542,10 @@ struct TuiApp {
     chat_scroll: u16,
     follow_chat: bool,
     chat_viewport_height: u16,
+    chat_viewport_width: u16,
     event_scroll: u16,
     event_viewport_height: u16,
+    event_viewport_width: u16,
     event_panel_collapsed: bool,
     /// 当前流式输出的 agent 消息在 `messages` 中的索引。
     /// 为 None 表示尚未开始流式输出；ChatDone 后归零。
@@ -567,8 +570,10 @@ impl TuiApp {
             chat_scroll: 0,
             follow_chat: true,
             chat_viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+            chat_viewport_width: DEFAULT_VIEWPORT_HEIGHT,
             event_scroll: 0,
             event_viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+            event_viewport_width: DEFAULT_VIEWPORT_HEIGHT,
             event_panel_collapsed: false,
             streaming_index: None,
         };
@@ -621,6 +626,7 @@ impl TuiApp {
     }
 
     fn push_user(&mut self, text: &str) {
+        self.follow_chat = true;
         self.push_message(MessageRole::User, text);
     }
 
@@ -664,14 +670,10 @@ impl TuiApp {
         match self.streaming_index.take() {
             Some(idx) => {
                 let remove = self.messages.get_mut(idx).is_some_and(|msg| {
-                    if msg.content.is_empty() {
-                        if final_text.is_empty() {
-                            true
-                        } else {
-                            msg.content.push_str(final_text);
-                            false
-                        }
+                    if final_text.is_empty() {
+                        msg.content.is_empty()
                     } else {
+                        final_text.clone_into(&mut msg.content);
                         false
                     }
                 });
@@ -941,10 +943,14 @@ impl TuiApp {
         ])
         .block(Block::default().borders(Borders::ALL).title("Runtime"));
 
-        let chat_lines = self.rendered_chat_lines();
         self.chat_viewport_height = chat_area.height.saturating_sub(2);
+        self.chat_viewport_width = chat_area.width.saturating_sub(2).max(1);
+        let chat_lines = wrap_lines(
+            self.rendered_chat_lines(),
+            usize::from(self.chat_viewport_width),
+        );
 
-        let chat_max_offset = self.max_chat_scroll_offset();
+        let chat_max_offset = max_scroll_offset(chat_lines.len(), self.chat_viewport_height);
         if self.follow_chat || self.chat_scroll > chat_max_offset {
             self.chat_scroll = chat_max_offset;
         }
@@ -957,7 +963,6 @@ impl TuiApp {
 
         let chat_panel = Paragraph::new(chat_lines)
             .block(Block::default().borders(Borders::ALL).title(chat_title))
-            .wrap(Wrap { trim: false })
             .scroll((self.chat_scroll, 0));
 
         frame.render_widget(header_title, *workspace_area);
@@ -970,13 +975,19 @@ impl TuiApp {
                 .block(Block::default().borders(Borders::LEFT));
             frame.render_widget(collapsed, *event_area);
         } else {
-            let event_lines = self.rendered_event_lines();
             self.event_viewport_height = event_area.height.saturating_sub(2);
-            self.event_scroll = self.event_scroll.min(self.max_event_scroll_offset());
+            self.event_viewport_width = event_area.width.saturating_sub(2).max(1);
+            let event_lines = wrap_lines(
+                self.rendered_event_lines(),
+                usize::from(self.event_viewport_width),
+            );
+            self.event_scroll = self.event_scroll.min(max_scroll_offset(
+                event_lines.len(),
+                self.event_viewport_height,
+            ));
 
             let event_panel = Paragraph::new(event_lines)
                 .block(Block::default().borders(Borders::ALL).title("Events"))
-                .wrap(Wrap { trim: false })
                 .scroll((self.event_scroll, 0));
             frame.render_widget(event_panel, *event_area);
         }
@@ -1008,20 +1019,19 @@ impl TuiApp {
     }
 
     fn max_chat_scroll_offset(&self) -> u16 {
-        let viewport = self.chat_viewport_height.max(1) as usize;
-        let total = self
-            .messages
-            .iter()
-            .map(|msg| msg.render_lines().len())
-            .sum::<usize>()
-            .max(1);
-        u16::try_from(total.saturating_sub(viewport)).unwrap_or(u16::MAX)
+        let wrapped = wrap_lines(
+            self.rendered_chat_lines(),
+            usize::from(self.chat_viewport_width.max(1)),
+        );
+        max_scroll_offset(wrapped.len(), self.chat_viewport_height)
     }
 
     fn max_event_scroll_offset(&self) -> u16 {
-        let viewport = self.event_viewport_height.max(1) as usize;
-        let total = self.events.len().max(1);
-        u16::try_from(total.saturating_sub(viewport)).unwrap_or(u16::MAX)
+        let wrapped = wrap_lines(
+            self.rendered_event_lines(),
+            usize::from(self.event_viewport_width.max(1)),
+        );
+        max_scroll_offset(wrapped.len(), self.event_viewport_height)
     }
 
     fn scroll_chat_up(&mut self, amount: u16) {
@@ -1193,6 +1203,52 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 
     let truncated = text.chars().take(max_chars).collect::<String>();
     format!("{truncated}{ELLIPSIS}")
+}
+
+fn max_scroll_offset(total_lines: usize, viewport_height: u16) -> u16 {
+    let viewport = usize::from(viewport_height.max(1));
+    u16::try_from(total_lines.max(1).saturating_sub(viewport)).unwrap_or(u16::MAX)
+}
+
+fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+
+    for line in lines {
+        let mut current = Vec::new();
+        let mut current_width = 0usize;
+
+        for span in line.spans {
+            let style = span.style;
+            for ch in span.content.chars() {
+                let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_width > 0 && current_width.saturating_add(ch_width) > width {
+                    wrapped.push(Line::from(mem::take(&mut current)));
+                    current_width = 0;
+                }
+
+                current.push(Span::styled(ch.to_string(), style));
+                current_width = current_width.saturating_add(ch_width);
+
+                if current_width >= width {
+                    wrapped.push(Line::from(mem::take(&mut current)));
+                    current_width = 0;
+                }
+            }
+        }
+
+        if current.is_empty() {
+            wrapped.push(Line::from(String::new()));
+        } else {
+            wrapped.push(Line::from(current));
+        }
+    }
+
+    if wrapped.is_empty() {
+        vec![Line::from(String::new())]
+    } else {
+        wrapped
+    }
 }
 
 fn cli_confirm(
