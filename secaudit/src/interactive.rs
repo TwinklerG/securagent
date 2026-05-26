@@ -2,6 +2,7 @@ mod commands;
 mod tui;
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc as std_mpsc;
 
 use secaudit_agent::state::AgentState;
 use secaudit_agent::{ChatMessage as AgentChatMessage, Role};
@@ -97,6 +98,10 @@ enum WorkerEvent {
     },
     SessionList {
         sessions: Result<Vec<SessionListItem>, String>,
+    },
+    ConfirmRequest {
+        prompt: String,
+        response_tx: std_mpsc::Sender<bool>,
     },
     Error(String),
 }

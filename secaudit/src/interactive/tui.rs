@@ -13,10 +13,10 @@ mod event_format;
 mod markdown;
 mod timestamp;
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout};
 use std::mem;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -51,6 +51,8 @@ use timestamp::{format_absolute_timestamp, now_timestamp};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_EVENT_LINES: usize = 500;
+const MAX_WORKER_EVENTS_PER_TICK: usize = 128;
+const MAX_TERMINAL_EVENTS_PER_TICK: usize = 64;
 const MAX_MESSAGE_ITEMS: usize = 240;
 const KEY_CTRL_C: char = 'c';
 const KEY_CTRL_D: char = 'd';
@@ -242,19 +244,53 @@ impl EventEntry {
     }
 }
 
+struct PendingConfirmation {
+    prompt: String,
+    response_tx: std_mpsc::Sender<bool>,
+}
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
+struct AlternateScreenGuard;
+
+impl Drop for AlternateScreenGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
 impl TerminalGuard {
     fn new() -> io::Result<Self> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "TUI 需要连接到交互式终端（stdin/stdout 必须是 TTY）",
+            ));
+        }
+
         enable_raw_mode()?;
+        let raw_mode_guard = RawModeGuard;
+
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
+        let alternate_screen_guard = AlternateScreenGuard;
 
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
+
+        mem::forget(raw_mode_guard);
+        mem::forget(alternate_screen_guard);
 
         Ok(Self { terminal })
     }
@@ -547,6 +583,7 @@ struct TuiApp {
     event_viewport_height: u16,
     event_viewport_width: u16,
     event_panel_collapsed: bool,
+    pending_confirmation: Option<PendingConfirmation>,
     /// 当前流式输出的 agent 消息在 `messages` 中的索引。
     /// 为 None 表示尚未开始流式输出；ChatDone 后归零。
     streaming_index: Option<usize>,
@@ -575,6 +612,7 @@ impl TuiApp {
             event_viewport_height: DEFAULT_VIEWPORT_HEIGHT,
             event_viewport_width: DEFAULT_VIEWPORT_HEIGHT,
             event_panel_collapsed: false,
+            pending_confirmation: None,
             streaming_index: None,
         };
 
@@ -846,6 +884,26 @@ impl TuiApp {
         }
     }
 
+    fn request_confirmation(&mut self, prompt: String, response_tx: std_mpsc::Sender<bool>) {
+        if let Some(pending) = self.pending_confirmation.take() {
+            let _ = pending.response_tx.send(false);
+        }
+
+        self.push_event(EventKind::System, format!("确认请求：{prompt}"));
+        self.pending_confirmation = Some(PendingConfirmation {
+            prompt,
+            response_tx,
+        });
+    }
+
+    fn resolve_confirmation(&mut self, approved: bool) {
+        if let Some(pending) = self.pending_confirmation.take() {
+            let _ = pending.response_tx.send(approved);
+            let result = if approved { "已允许" } else { "已拒绝" };
+            self.push_event(EventKind::System, format!("确认结果：{result}"));
+        }
+    }
+
     fn rendered_chat_lines(&self) -> Vec<Line<'static>> {
         if self.messages.is_empty() {
             return vec![Line::from(Span::styled(
@@ -1007,7 +1065,9 @@ impl TuiApp {
         frame.render_widget(input_panel, *input_area);
         frame.render_widget(footer, *footer_area);
 
-        if self.show_help {
+        if let Some(pending) = &self.pending_confirmation {
+            draw_confirmation_overlay(frame, &pending.prompt);
+        } else if self.show_help {
             draw_help_overlay(frame);
         } else {
             let col_u16 = u16::try_from(self.input.cursor_display_col()).unwrap_or(u16::MAX);
@@ -1126,6 +1186,37 @@ fn draw_help_overlay(frame: &mut Frame<'_>) {
                 .borders(Borders::ALL)
                 .title("Help")
                 .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel, area);
+}
+
+fn draw_confirmation_overlay(frame: &mut Frame<'_>, prompt: &str) {
+    let area = centered_rect(72, 32, frame.area());
+    let lines = vec![
+        Line::from(Span::styled(
+            "工具确认",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(String::new()),
+        Line::from(prompt.to_owned()),
+        Line::from(String::new()),
+        Line::from(vec![
+            Span::styled("Y", Style::default().fg(Color::LightGreen)),
+            Span::raw(" 允许    "),
+            Span::styled("N / Esc / Enter", Style::default().fg(Color::LightRed)),
+            Span::raw(" 拒绝"),
+        ]),
+    ];
+
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Confirmation")
+                .border_style(Style::default().fg(Color::Yellow)),
         )
         .wrap(Wrap { trim: false });
 
@@ -1255,21 +1346,18 @@ fn cli_confirm(
     event_tx: mpsc::UnboundedSender<WorkerEvent>,
 ) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
     Arc::new(move |prompt: &str| {
-        let _ = event_tx.send(WorkerEvent::Think(format!("确认请求：{prompt}")));
+        let (response_tx, response_rx) = std_mpsc::channel();
+        if event_tx
+            .send(WorkerEvent::ConfirmRequest {
+                prompt: prompt.to_owned(),
+                response_tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
 
-        let _ = disable_raw_mode();
-        eprint!("\n确认 {prompt} [y/N] ");
-        let _ = io::stderr().flush();
-
-        let mut input = String::new();
-        let approved = if io::stdin().read_line(&mut input).is_err() {
-            false
-        } else {
-            matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
-        };
-
-        let _ = enable_raw_mode();
-        approved
+        response_rx.recv().unwrap_or(false)
     })
 }
 
@@ -1410,7 +1498,11 @@ async fn run_worker(
 }
 
 fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceiver<WorkerEvent>) {
-    while let Ok(worker_event) = event_rx.try_recv() {
+    for _ in 0..MAX_WORKER_EVENTS_PER_TICK {
+        let Ok(worker_event) = event_rx.try_recv() else {
+            break;
+        };
+
         match worker_event {
             WorkerEvent::Ready {
                 tool_names,
@@ -1456,6 +1548,12 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                 Ok(sessions) => app.show_sessions(&sessions),
                 Err(error) => app.push_error(&format!("会话列表读取失败：{error}")),
             },
+            WorkerEvent::ConfirmRequest {
+                prompt,
+                response_tx,
+            } => {
+                app.request_confirmation(prompt, response_tx);
+            }
             WorkerEvent::Error(message) => {
                 app.busy = false;
                 app.push_error(&message);
@@ -1470,7 +1568,19 @@ fn process_terminal_key(
     command_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
     if is_quit_key(key.code, key.modifiers) {
+        app.resolve_confirmation(false);
         app.should_quit = true;
+        return;
+    }
+
+    if app.pending_confirmation.is_some() {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => app.resolve_confirmation(true),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc | KeyCode::Enter => {
+                app.resolve_confirmation(false);
+            }
+            _ => {}
+        }
         return;
     }
 
@@ -1591,6 +1701,32 @@ fn process_terminal_key(
     }
 }
 
+fn process_terminal_events(
+    app: &mut TuiApp,
+    command_tx: &mpsc::UnboundedSender<WorkerCommand>,
+    wait: Duration,
+) {
+    if !event::poll(wait).unwrap_or(false) {
+        return;
+    }
+
+    for _ in 0..MAX_TERMINAL_EVENTS_PER_TICK {
+        let Ok(event) = event::read() else {
+            break;
+        };
+
+        if let CrosstermEvent::Key(key) = event
+            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        {
+            process_terminal_key(key, app, command_tx);
+        }
+
+        if app.should_quit || !event::poll(Duration::ZERO).unwrap_or(false) {
+            break;
+        }
+    }
+}
+
 fn is_quit_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL)
         && matches!(code, KeyCode::Char(KEY_CTRL_C | KEY_CTRL_D))
@@ -1613,7 +1749,16 @@ pub async fn run(config: Config, work_dir: PathBuf) {
     let mut app = TuiApp::new(work_dir);
 
     loop {
+        process_terminal_events(&mut app, &command_tx, Duration::ZERO);
+        if app.should_quit {
+            break;
+        }
+
         process_worker_events(&mut app, &mut event_rx);
+        process_terminal_events(&mut app, &command_tx, Duration::ZERO);
+        if app.should_quit {
+            break;
+        }
 
         let draw_result = terminal_guard.terminal.draw(|frame| app.draw(frame));
         if draw_result.is_err() {
@@ -1625,15 +1770,14 @@ pub async fn run(config: Config, work_dir: PathBuf) {
             break;
         }
 
-        if event::poll(POLL_INTERVAL).unwrap_or(false)
-            && let Ok(CrosstermEvent::Key(key)) = event::read()
-            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-        {
-            process_terminal_key(key, &mut app, &command_tx);
-        }
+        process_terminal_events(&mut app, &command_tx, POLL_INTERVAL);
     }
 
     let _ = command_tx.send(WorkerCommand::Shutdown);
+    app.resolve_confirmation(false);
+    if app.busy {
+        worker.abort();
+    }
     let _ = worker.await;
 }
 
@@ -1678,12 +1822,15 @@ fn handle_command(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::mpsc::channel;
 
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc::unbounded_channel;
 
     use super::{
-        DisplayMessage, DisplayRole, HELP_EVENT_SUMMARY, HELP_TEXT, InputBuffer, SessionSnapshot,
-        TuiApp, is_quit_key,
+        DisplayMessage, DisplayRole, HELP_EVENT_SUMMARY, HELP_TEXT, InputBuffer,
+        MAX_WORKER_EVENTS_PER_TICK, SessionSnapshot, TuiApp, WorkerCommand, WorkerEvent,
+        is_quit_key, process_terminal_key, process_worker_events,
     };
 
     #[test]
@@ -1782,5 +1929,93 @@ mod tests {
             !is_quit_key(KeyCode::Char('d'), KeyModifiers::NONE),
             "普通 d 不应触发退出"
         );
+    }
+
+    #[test]
+    fn worker_event_processing_is_bounded_per_tick() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let initial_event_count = app.events.len();
+        let (tx, mut rx) = unbounded_channel();
+
+        for idx in 0..(MAX_WORKER_EVENTS_PER_TICK + 10) {
+            tx.send(WorkerEvent::Think(format!("event {idx}")))
+                .expect("send worker event");
+        }
+
+        process_worker_events(&mut app, &mut rx);
+
+        assert_eq!(
+            app.events.len(),
+            initial_event_count + MAX_WORKER_EVENTS_PER_TICK,
+            "单帧事件处理应有上限，避免运行中键盘输入被饿死"
+        );
+
+        process_worker_events(&mut app, &mut rx);
+
+        assert_eq!(
+            app.events.len(),
+            initial_event_count + MAX_WORKER_EVENTS_PER_TICK + 10
+        );
+    }
+
+    #[test]
+    fn quit_key_works_while_agent_is_busy() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let (tx, _rx) = unbounded_channel::<WorkerCommand>();
+
+        app.busy = true;
+        process_terminal_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut app,
+            &tx,
+        );
+
+        assert!(app.should_quit, "Ctrl+D 运行中也应立即触发退出");
+    }
+
+    #[test]
+    fn confirmation_request_is_handled_inside_tui() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let (event_tx, mut event_rx) = unbounded_channel();
+        let (response_tx, response_rx) = channel();
+
+        event_tx
+            .send(WorkerEvent::ConfirmRequest {
+                prompt: "允许执行 pwd 吗？".to_owned(),
+                response_tx,
+            })
+            .expect("send confirm request");
+
+        process_worker_events(&mut app, &mut event_rx);
+
+        assert!(app.pending_confirmation.is_some());
+        let _ = response_rx.try_recv().unwrap_err();
+    }
+
+    #[test]
+    fn confirmation_keys_do_not_mutate_input() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let (command_tx, _command_rx) = unbounded_channel::<WorkerCommand>();
+        let (response_tx, response_rx) = channel();
+
+        app.request_confirmation("允许执行 pwd 吗？".to_owned(), response_tx);
+        process_terminal_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app,
+            &command_tx,
+        );
+
+        assert!(app.input.is_empty());
+        let _ = response_rx.try_recv().unwrap_err();
+
+        process_terminal_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+            &command_tx,
+        );
+
+        assert!(response_rx.recv().expect("confirmation response"));
+        assert!(app.pending_confirmation.is_none());
+        assert!(app.input.is_empty());
     }
 }
