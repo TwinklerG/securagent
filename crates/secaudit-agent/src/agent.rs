@@ -16,6 +16,7 @@ use crate::tools::{ConfirmFn, Tool};
 use executor::{ReActExecutor, StepResult};
 use state::AgentState;
 
+use secaudit_skills::SkillRegistry;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -131,6 +132,8 @@ pub struct Agent {
     tools: Vec<Box<dyn Tool>>,
     /// 事件总线：状态与回调管理
     events: EventBus,
+    /// Skill 注册表
+    skill_registry: Option<SkillRegistry>,
     /// 工作目录
     work_dir: PathBuf,
 }
@@ -200,6 +203,18 @@ impl Agent {
     pub fn new(config: Config, work_dir: PathBuf, confirm: ConfirmFn) -> Self {
         let llm = llm::create_client(&config);
         let tools = tools::default_tools(work_dir.clone(), confirm);
+        let skill_registry = if config.enable_skills {
+            match SkillRegistry::load_from_dir(&work_dir) {
+                Ok(registry) => Some(registry),
+                Err(err) => {
+                    tracing::warn!("加载 Skills 失败，已禁用 Skill 匹配：{err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             llm,
@@ -212,6 +227,7 @@ impl Agent {
                 on_tool_call: None,
                 on_tool_result: None,
             },
+            skill_registry,
             work_dir,
         }
     }
@@ -256,6 +272,30 @@ impl Agent {
         self.tools.iter().map(|t| t.name().into_owned()).collect()
     }
 
+    /// 获取可用 Skill 名称和描述列表。
+    #[must_use]
+    pub fn skill_list(&self) -> Vec<(String, String)> {
+        self.skill_registry
+            .as_ref()
+            .map(SkillRegistry::list)
+            .unwrap_or_default()
+    }
+
+    /// 将匹配的 Skill 注入为本轮 Agent 输入；未匹配时保持原始用户输入。
+    fn build_agent_input(&self, user_message: &str, session_id: &str) -> String {
+        self.skill_registry
+            .as_ref()
+            .and_then(|registry| registry.match_command(user_message))
+            .map_or_else(
+                || user_message.to_owned(),
+                |skill| {
+                    let notice = format!("触发 Skill：{}", skill.name());
+                    self.events.notify_think(&notice);
+                    skill.build_prompt(user_message, session_id)
+                },
+            )
+    }
+
     /// 单轮交互：接收用户消息，Agent 自主使用工具后返回文本回复。
     ///
     /// `Session` 持有对话历史，`chat()` 内部进入 `ReAct` 循环，直到 LLM 返回纯文本。
@@ -274,14 +314,18 @@ impl Agent {
             session.push_message(ChatMessage::system(system_prompt));
         }
 
-        // 追加用户消息
+        let agent_input = self.build_agent_input(user_message, &session.id);
+
+        // 追加原始用户消息，保持会话历史与界面展示一致。
         session.push_message(ChatMessage::user(user_message));
 
-        // 构建 executor 并加载历史
+        // 构建 executor 并加载历史；本轮输入使用 Skill 注入后的内容。
         let mut executor = ReActExecutor::new(&self.llm, &self.tools);
-        for msg in session.messages() {
+        let history_len = session.messages().len().saturating_sub(1);
+        for msg in session.messages().iter().take(history_len) {
             executor.push_message(msg.clone());
         }
+        executor.push_message(ChatMessage::user(agent_input));
 
         // ReAct 循环
         let max_iter = self.config.max_iterations;

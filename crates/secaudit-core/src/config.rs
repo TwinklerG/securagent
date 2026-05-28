@@ -17,6 +17,9 @@ const DEFAULT_MAX_ITERATIONS: u32 = 40;
 /// 默认推理策略
 const DEFAULT_STRATEGY: &str = "react";
 
+/// 默认启用 Skills
+const DEFAULT_ENABLE_SKILLS: bool = true;
+
 /// 应用配置，支持环境变量（`SECAUDIT_` 前缀）和配置文件两种来源。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
@@ -30,6 +33,8 @@ pub struct Config {
     pub max_iterations: u32,
     /// 推理策略（react / reflexion）
     pub reasoning_strategy: String,
+    /// 是否启用 Skills 系统
+    pub enable_skills: bool,
 }
 
 impl Default for Config {
@@ -40,6 +45,7 @@ impl Default for Config {
             model: DEFAULT_MODEL.into(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
             reasoning_strategy: DEFAULT_STRATEGY.into(),
+            enable_skills: DEFAULT_ENABLE_SKILLS,
         }
     }
 }
@@ -69,12 +75,18 @@ impl Config {
         let reasoning_strategy =
             var(format!("{ENV_PREFIX}STRATEGY")).unwrap_or_else(|_| DEFAULT_STRATEGY.into());
 
+        let enable_skills = var(format!("{ENV_PREFIX}ENABLE_SKILLS"))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_ENABLE_SKILLS);
+
         Ok(Self {
             api_base_url,
             api_key,
             model,
             max_iterations,
             reasoning_strategy,
+            enable_skills,
         })
     }
 

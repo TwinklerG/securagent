@@ -7,6 +7,7 @@ members = [
     "crates/secaudit-tools",
     "crates/secaudit-agent",
     "crates/secaudit-conversation",
+    "crates/secaudit-skills",
 ]
 
 [workspace.dependencies]
@@ -17,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

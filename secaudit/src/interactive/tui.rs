@@ -87,18 +87,20 @@ const HELP_TEXT: &[&str] = &[
     "  /session <id|序号>  切换到指定会话",
     "  /status        显示当前状态",
     "  /tools         列出工具",
+    "  /skills        列出可用 Skills",
     "  /exit          退出",
 ];
 
 const HELP_EVENT_SUMMARY: &str = "已显示帮助。";
 const STATUS_EVENT_SUMMARY: &str = "已显示当前状态。";
 const TOOLS_EVENT_SUMMARY: &str = "已显示可用工具。";
+const SKILLS_EVENT_SUMMARY: &str = "已显示可用 Skills。";
 const CLEAR_EVENT_SUMMARY: &str = "已开启新会话，当前视图与事件已清空。";
 const SESSIONS_EVENT_SUMMARY: &str = "已显示会话列表。";
 const SWITCH_SESSION_EVENT_SUMMARY: &str = "已切换会话。";
 const SESSION_PREVIEW_MAX_CHARS: usize = 96;
 
-const COMMAND_CANDIDATES: [&str; 8] = [
+const COMMAND_CANDIDATES: [&str; 9] = [
     "/help",
     "/new",
     "/clear",
@@ -106,6 +108,7 @@ const COMMAND_CANDIDATES: [&str; 8] = [
     "/session ",
     "/status",
     "/tools",
+    "/skills",
     "/exit",
 ];
 
@@ -572,6 +575,7 @@ struct TuiApp {
     busy: bool,
     show_help: bool,
     tool_names: Vec<String>,
+    skill_list: Vec<(String, String)>,
     current_session_id: Option<String>,
     message_count: usize,
     last_state_label: String,
@@ -601,6 +605,7 @@ impl TuiApp {
             busy: false,
             show_help: false,
             tool_names: Vec::new(),
+            skill_list: Vec::new(),
             current_session_id: None,
             message_count: 0,
             last_state_label: "就绪".to_owned(),
@@ -867,6 +872,24 @@ impl TuiApp {
             .collect::<Vec<_>>()
             .join("\n");
         self.push_system_block(&format!("可用工具：\n{tools}"), TOOLS_EVENT_SUMMARY);
+    }
+
+    fn show_skills(&mut self) {
+        let text = if self.skill_list.is_empty() {
+            "未找到可用 Skills。\n\
+            Skills 存放在项目 .secaudit/skills/<skill-name>/SKILL.md 或 ~/.secaudit/skills/<skill-name>/SKILL.md 中。\n\
+            使用方式: /skill-name [arguments]"
+                .to_owned()
+        } else {
+            let mut out = format!("可用 Skills（{}个）：\n\n", self.skill_list.len());
+            for (name, desc) in &self.skill_list {
+                use std::fmt::Write as _;
+                let _ = writeln!(out, "  /{name} — {desc}");
+            }
+            out.push_str("\n使用方式: /skill-name [arguments]");
+            out
+        };
+        self.push_system_block(&text, SKILLS_EVENT_SUMMARY);
     }
 
     fn toggle_event_panel(&mut self) {
@@ -1410,6 +1433,7 @@ async fn run_worker(
     bind_agent_callbacks(&mut agent, &event_tx);
 
     let tool_names = agent.tool_names();
+    let skill_list = agent.skill_list();
 
     let conversation = match build_worker_conversation() {
         Ok(service) => service,
@@ -1428,6 +1452,7 @@ async fn run_worker(
 
     let _ = event_tx.send(WorkerEvent::Ready {
         tool_names,
+        skill_list,
         session: SessionSnapshot::from_managed(&session),
     });
 
@@ -1506,9 +1531,11 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
         match worker_event {
             WorkerEvent::Ready {
                 tool_names,
+                skill_list,
                 session,
             } => {
                 app.tool_names = tool_names;
+                app.skill_list = skill_list;
                 app.current_session_id = Some(session.id);
                 app.message_count = session.message_count;
                 app.push_system("Agent 已就绪。");
@@ -1815,6 +1842,7 @@ fn handle_command(
             app.show_status();
         }
         Command::Tools => app.show_tools(),
+        Command::Skills => app.show_skills(),
         Command::Exit => app.should_quit = true,
     }
 }

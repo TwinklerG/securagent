@@ -20,6 +20,7 @@ pub enum Command {
     SwitchSession { selector: String },
     Status,
     Tools,
+    Skills,
     Exit,
 }
 
@@ -37,6 +38,7 @@ pub fn parse(input: &str) -> UserInput {
         "/sessions" => Some(Command::ListSessions),
         "/status" => Some(Command::Status),
         "/tools" => Some(Command::Tools),
+        "/skills" => Some(Command::Skills),
         "/exit" => Some(Command::Exit),
         _ => parse_session_command(trimmed),
     };
@@ -101,6 +103,11 @@ mod tests {
     #[test]
     fn parse_exit_command_with_spaces() {
         assert_eq!(parse("  /exit  "), UserInput::Command(Command::Exit));
+    }
+
+    #[test]
+    fn parse_skills_command() {
+        assert_eq!(parse("/skills"), UserInput::Command(Command::Skills));
     }
 
     #[test]

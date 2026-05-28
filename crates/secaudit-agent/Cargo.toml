@@ -8,10 +8,11 @@ async-trait.workspace = true
 chrono = "0.4"
 serde.workspace = true
 serde_json.workspace = true
-tracing = "0.1"
+tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 secaudit-core = { path = "../secaudit-core" }
 secaudit-llm = { path = "../secaudit-llm" }
+secaudit-skills = { path = "../secaudit-skills" }
 secaudit-tools = { path = "../secaudit-tools" }
 
 [lints]

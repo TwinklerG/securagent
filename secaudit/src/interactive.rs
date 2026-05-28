@@ -70,6 +70,8 @@ enum DisplayRole {
 enum WorkerEvent {
     Ready {
         tool_names: Vec<String>,
+        /// `(name, description)` 列表，来自 `SkillRegistry`
+        skill_list: Vec<(String, String)>,
         session: SessionSnapshot,
     },
     State(AgentState),
