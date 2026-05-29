@@ -1,0 +1,101 @@
+[package]
+name = "secaudit-gui"
+version = "0.1.0"
+description = "SecAudit Agent 桌面工作台"
+authors = ["secaudit"]
+edition = "2024"
+
+[lib]
+name = "secaudit_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "secaudit-gui"
+path = "src/main.rs"
+
+[workspace]
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+as_underscore = "deny"
+dbg_macro = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+lossy_float_literal = "deny"
+panic = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+absolute_paths = "warn"
+alloc_instead_of_core = "warn"
+allow_attributes = "warn"
+assertions_on_result_states = "warn"
+cognitive_complexity = "warn"
+create_dir = "warn"
+decimal_literal_representation = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+filetype_is_file = "warn"
+if_then_some_else_none = "warn"
+impl_trait_in_params = "warn"
+integer_division = "warn"
+map_err_ignore = "warn"
+map_with_unused_argument_over_ranges = "warn"
+missing_assert_message = "warn"
+mixed_read_write_in_expression = "warn"
+mod_module_files = "warn"
+module_inception = "warn"
+multiple_inherent_impl = "warn"
+mutex_atomic = "warn"
+mutex_integer = "warn"
+needless_raw_strings = "warn"
+partial_pub_fields = "warn"
+pathbuf_init_then_push = "warn"
+pub_without_shorthand = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+redundant_test_prefix = "warn"
+redundant_type_annotations = "warn"
+ref_patterns = "warn"
+renamed_function_params = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+return_and_then = "warn"
+same_name_method = "warn"
+semicolon_inside_block = "warn"
+str_to_string = "warn"
+string_add = "warn"
+string_lit_chars_any = "warn"
+tests_outside_test_module = "warn"
+try_err = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+unused_result_ok = "warn"
+use_debug = "warn"
+verbose_file_reads = "warn"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+struct_excessive_bools = "allow"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+secaudit-agent = { path = "../../../crates/secaudit-agent" }
+secaudit-conversation = { path = "../../../crates/secaudit-conversation" }
+secaudit-core = { path = "../../../crates/secaudit-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2.7.1"
+tokio = { version = "1", features = ["sync"] }
+ts-rs = { version = "12", features = ["serde-compat"] }

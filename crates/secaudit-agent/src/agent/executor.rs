@@ -28,14 +28,7 @@ impl<'a> ReActExecutor<'a> {
     /// 创建执行器，自动从 `Tool` trait 构建工具定义列表。
     #[must_use]
     pub fn new(llm: &'a HttpLlmClient, tools: &'a [Box<dyn Tool>]) -> Self {
-        let tool_defs: Vec<ToolDefinition> = tools
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name().into(),
-                description: t.description().into(),
-                parameters: t.parameters_schema(),
-            })
-            .collect();
+        let tool_defs = tool_definitions_from_tools(tools);
 
         Self {
             llm,
@@ -155,4 +148,15 @@ impl<'a> ReActExecutor<'a> {
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
+}
+
+pub(crate) fn tool_definitions_from_tools(tools: &[Box<dyn Tool>]) -> Vec<ToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| ToolDefinition {
+            name: tool.name().into_owned(),
+            description: tool.description().into_owned(),
+            parameters: tool.parameters_schema(),
+        })
+        .collect()
 }

@@ -12,3 +12,12 @@ CLAUDE.md
 outputs
 demo-projects
 .secaudit/
+
+# Web GUI generated files
+apps/secaudit-gui/node_modules/
+apps/secaudit-gui/dist/
+apps/secaudit-gui/.cargo-target/
+apps/secaudit-gui/src-tauri/target/
+apps/secaudit-gui/test-results/
+test-results/
+.cargo-target/

@@ -178,7 +178,7 @@ async fn main() {
         }
 
         // 加载配置
-        let config = match Config::from_env() {
+        let config = match Config::load() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("{}: {e}", "配置错误".red().bold());
@@ -187,7 +187,7 @@ async fn main() {
         };
         run_headless_chat(&cli, config).await;
     } else if let Some(target) = &cli.target {
-        let config = match Config::from_env() {
+        let config = match Config::load() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("{}: {e}", "配置错误".red().bold());
@@ -196,7 +196,7 @@ async fn main() {
         };
         run_single_file(&cli, config, target).await;
     } else {
-        let config = match Config::from_env() {
+        let config = match Config::load() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("{}: {e}", "配置错误".red().bold());

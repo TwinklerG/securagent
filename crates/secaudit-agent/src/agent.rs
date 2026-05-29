@@ -8,12 +8,12 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::llm::{self, ChatMessage, HttpLlmClient, Role};
+use crate::llm::{self, ChatMessage, HttpLlmClient, Role, ToolDefinition};
 use crate::prompt;
 use crate::session::Session;
 use crate::tools;
 use crate::tools::{ConfirmFn, Tool};
-use executor::{ReActExecutor, StepResult};
+use executor::{ReActExecutor, StepResult, tool_definitions_from_tools};
 use state::AgentState;
 
 use secaudit_skills::SkillRegistry;
@@ -270,6 +270,12 @@ impl Agent {
     #[must_use]
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.iter().map(|t| t.name().into_owned()).collect()
+    }
+
+    /// 获取可用工具定义列表。
+    #[must_use]
+    pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        tool_definitions_from_tools(&self.tools)
     }
 
     /// 获取可用 Skill 名称和描述列表。

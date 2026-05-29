@@ -1,0 +1,35 @@
+{
+    "name": "secaudit-gui",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite --host 127.0.0.1",
+        "build": "vue-tsc --noEmit && vite build",
+        "preview": "vite preview --host 127.0.0.1",
+        "tauri": "tauri",
+        "smoke:gui": "node ./scripts/gui-smoke.mjs",
+        "check": "biome check . && vue-tsc --noEmit",
+        "format": "biome format --write ."
+    },
+    "dependencies": {
+        "@tauri-apps/api": "^2.0.0",
+        "@tauri-apps/plugin-dialog": "^2.7.1",
+        "highlight.js": "^11.11.1",
+        "lucide-vue-next": "^0.468.0",
+        "markdown-it": "^14.1.1",
+        "vue": "^3.5.0"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.0.0",
+        "@tailwindcss/vite": "^4.0.0",
+        "@tauri-apps/cli": "^2.0.0",
+        "@types/markdown-it": "^14.1.2",
+        "@vitejs/plugin-vue": "^6.0.0",
+        "tailwindcss": "^4.0.0",
+        "typescript": "^6.0.0",
+        "vite": "^8.0.0",
+        "vite-plugin-vue-devtools": "^8.1.2",
+        "vue-tsc": "^3.0.0"
+    }
+}

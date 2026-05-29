@@ -1,0 +1,37 @@
+# secaudit-gui Justfile — GUI 命令
+
+GUI_DIR := "."
+GUI_TAURI_MANIFEST := "./src-tauri/Cargo.toml"
+
+default:
+    @just --list
+
+install:
+    bun ci
+
+# GUI 前端与 Tauri 后端质量检查
+check:
+    bun run --cwd {{ GUI_DIR }} check
+    cargo fmt --manifest-path {{ GUI_TAURI_MANIFEST }} --check
+    cargo clippy --manifest-path {{ GUI_TAURI_MANIFEST }} --all-targets -- -D warnings
+    cargo test --manifest-path {{ GUI_TAURI_MANIFEST }} --all-targets
+
+# 生成 GUI 的 Rust -> TypeScript 绑定
+bindings:
+    cargo test --manifest-path {{ GUI_TAURI_MANIFEST }} --lib export_bindings
+
+# 构建 GUI 前端产物
+build: bindings
+    bun run --cwd {{ GUI_DIR }} build
+
+# 运行 GUI 浏览器烟测（Edge/Chrome + CDP）
+gui-smoke:
+    bun run --cwd {{ GUI_DIR }} smoke:gui
+
+# 启动真实 Tauri GUI 桌面端
+dev:
+    bun run --cwd {{ GUI_DIR }} tauri dev
+
+# 启动浏览器预览服务（使用 mock 数据，不连接 Tauri 后端）
+preview:
+    bun run --cwd {{ GUI_DIR }} dev

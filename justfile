@@ -2,6 +2,9 @@
 set dotenv-required
 set dotenv-override
 
+mod gui "apps/secaudit-gui"
+
+
 default:
     @just --list
 

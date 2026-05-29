@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.cargo-target/
+src-tauri/target/
+test-results/
