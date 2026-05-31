@@ -43,7 +43,6 @@ pub(crate) struct RunPanel {
     pub(crate) status_detail: String,
     pub(crate) busy: bool,
     pub(crate) can_send: bool,
-    pub(crate) can_cancel: bool,
     pub(crate) primary_action_label: String,
     pub(crate) pending_label: String,
     pub(crate) pending_detail: String,
@@ -190,7 +189,7 @@ impl FindingStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub(crate) enum FindingSeverity {
@@ -288,6 +287,25 @@ pub(crate) enum TraceEventKind {
 #[ts(export)]
 pub(crate) struct AgentEvent {
     pub(crate) trace: TraceEvent,
+    pub(crate) approval_request: Option<CommandApprovalRequest>,
+    pub(crate) approval_resolution: Option<CommandApprovalResolution>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub(crate) struct CommandApprovalRequest {
+    pub(crate) id: u64,
+    pub(crate) prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub(crate) struct CommandApprovalResolution {
+    pub(crate) id: u64,
+    pub(crate) approved: bool,
+    pub(crate) status_label: String,
 }
 
 impl GuiMessage {

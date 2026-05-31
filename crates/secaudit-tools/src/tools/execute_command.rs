@@ -21,6 +21,8 @@ const TOOL_DESC: &str = "在工作目录中执行 shell 命令，安全命令自
 
 const PARAM_COMMAND: &str = "command";
 const PARAM_TIMEOUT_SECS: &str = "timeout_secs";
+const PARAM_COMMAND_DESC: &str = "要执行的命令；工具会自动在工作目录中执行";
+const PARAM_TIMEOUT_SECS_DESC: &str = "超时秒数（默认 30）";
 
 // —— 默认值与限制 ——
 
@@ -173,11 +175,11 @@ impl Tool for ExecuteCommand {
             "properties": {
                 PARAM_COMMAND: {
                     "type": "string",
-                    "description": "要执行的命令"
+                    "description": PARAM_COMMAND_DESC
                 },
                 PARAM_TIMEOUT_SECS: {
                     "type": "integer",
-                    "description": "超时秒数（默认 30）"
+                    "description": PARAM_TIMEOUT_SECS_DESC
                 }
             },
             "required": [PARAM_COMMAND]

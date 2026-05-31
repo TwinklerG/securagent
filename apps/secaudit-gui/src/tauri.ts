@@ -8,6 +8,7 @@ import {
   createPreviewWorkbench,
   createPreviewWorkbenchForWorkDir,
   PREVIEW_AGENT_EVENT_DELAY_MS,
+  PREVIEW_APPROVAL_PROMPT,
 } from "./preview";
 import type { AgentEvent, AgentWorkbench } from "./types";
 
@@ -57,6 +58,14 @@ export async function setWorkDir(workDir: string): Promise<AgentWorkbench> {
   return invoke<AgentWorkbench>("set_work_dir", { workDir });
 }
 
+export async function resolveCommandApproval(id: number, approved: boolean): Promise<void> {
+  if (!isTauriRuntime()) {
+    emitPreviewApprovalResolution(id, approved);
+    return;
+  }
+  await invoke("resolve_command_approval", { id, approved });
+}
+
 export async function selectWorkDir(currentWorkDir: string): Promise<string | null> {
   if (!isTauriRuntime()) {
     return null;
@@ -77,6 +86,28 @@ export async function listenAgentEvents(handler: (event: AgentEvent) => void) {
     };
   }
   return listen<AgentEvent>("agent-event", (event) => handler(event.payload));
+}
+
+function emitPreviewApprovalResolution(id: number, approved: boolean) {
+  const statusLabel = approved ? "已允许" : "已拒绝";
+  const event: AgentEvent = {
+    trace: {
+      id,
+      kind: "tool_confirm",
+      title: "工具确认结果",
+      detail: `${PREVIEW_APPROVAL_PROMPT}\n\n预览确认结果：${statusLabel}。`,
+      occurredAt: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+    },
+    approvalRequest: null,
+    approvalResolution: {
+      id,
+      approved,
+      statusLabel,
+    },
+  };
+  for (const handler of previewAgentEventHandlers) {
+    handler(event);
+  }
 }
 
 async function emitPreviewAgentEvents(message: string) {

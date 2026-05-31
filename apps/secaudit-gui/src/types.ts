@@ -1,5 +1,7 @@
 export type { AgentEvent } from "./bindings/AgentEvent";
 export type { AgentWorkbench } from "./bindings/AgentWorkbench";
+export type { CommandApprovalRequest } from "./bindings/CommandApprovalRequest";
+export type { CommandApprovalResolution } from "./bindings/CommandApprovalResolution";
 export type { ConversationPanel } from "./bindings/ConversationPanel";
 export type { FindingEvidence } from "./bindings/FindingEvidence";
 export type { FindingPreview } from "./bindings/FindingPreview";

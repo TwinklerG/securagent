@@ -1,4 +1,5 @@
 export const SESSION_ID_PREVIEW_LENGTH = 8;
+export const SESSION_RAIL_WIDTH = 292;
 export const TRACE_LIMIT = 120;
 export const TEXTAREA_MIN_HEIGHT = 44;
 export const TEXTAREA_MAX_HEIGHT = 148;

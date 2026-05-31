@@ -76,7 +76,7 @@ pub fn chat_system_prompt(work_dir: &Path) -> String {
 - 描述：具体问题说明
 - 修复建议：可操作的修复方案
 
-当前工作目录：{work_dir}",
+当前工具与命令执行工作目录：{work_dir}",
         work_dir = work_dir.display()
     )
 }

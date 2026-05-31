@@ -2,12 +2,29 @@
 
 GUI_DIR := "."
 GUI_TAURI_MANIFEST := "./src-tauri/Cargo.toml"
+GUI_CLEAN_OUTPUTS := "dist,test-results"
+GUI_NODE_MODULES := "node_modules"
 
-default:
+_default:
     @just --list
 
 install:
     bun ci
+
+# 清理 GUI 前端构建与测试产物
+clean-frontend:
+    bun --eval "import { rmSync } from 'node:fs'; for (const path of '{{ GUI_CLEAN_OUTPUTS }}'.split(',')) rmSync(path, { recursive: true, force: true });"
+
+# 清理 GUI Tauri Rust 构建产物
+clean-tauri:
+    cargo clean --manifest-path {{ GUI_TAURI_MANIFEST }}
+
+# 清理 GUI 构建产物
+clean: clean-frontend clean-tauri
+
+# 深度清理 GUI 依赖目录
+clean-deps: clean
+    bun --eval "import { rmSync } from 'node:fs'; rmSync('{{ GUI_NODE_MODULES }}', { recursive: true, force: true });"
 
 # GUI 前端与 Tauri 后端质量检查
 check:

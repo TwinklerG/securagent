@@ -173,12 +173,13 @@ just test        # 运行测试
 
 项目已提供 `.gitlab-ci.yml`，默认在 **Push / Merge Request / Tag** 触发流水线：
 
-- `quality`：代码质量检查
-- `test`：运行测试
+- `rust-check`：Rust 工作区格式、Clippy 与测试
+- `gui-frontend-check`：GUI 前端依赖安装、Biome 与类型检查
+- `gui-tauri-check`：GUI Tauri Rust 格式、Clippy、测试与绑定文件检查
 - `build`：Release 构建并产出二进制 artifacts（`secaudit`）
 - `release`：仅在 Tag 触发，打包 `securagent-<tag>.tar.gz` 作为发布产物
 
-其中质量检查与 `just check` 保持一致（参考 `justfile`）。
+GUI 前端检查使用 `GUI_BUN_IMAGE` 指定的预装 Bun 镜像，避免在流水线中通过外部安装脚本临时下载 Bun；如果 Runner 不能访问 Docker Hub，将该变量指向内网镜像即可。
 
 ## 数据集准备（scripts）
 

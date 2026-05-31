@@ -50,3 +50,4 @@ eval-batch *ARGS:
 # 清理构建产物
 clean:
     cargo clean
+    just gui clean

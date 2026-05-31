@@ -14,6 +14,8 @@ const PREVIEW_WORK_DIR = "D:\\Project\\securagent";
 const PREVIEW_SESSION_ID = "preview-session";
 const PREVIEW_ARCHIVABLE_SESSION_ID = "preview-archivable-session";
 const PREVIEW_ARCHIVED_SESSION_ID = "preview-archived-session";
+const PREVIEW_APPROVAL_ID = 9001;
+export const PREVIEW_APPROVAL_PROMPT = "即将执行未知命令：npm audit --json，是否允许？";
 const PREVIEW_STORAGE_ROOT = "~/.secaudit";
 const PREVIEW_CONFIG_ERROR =
   "浏览器预览模式：真实 Agent 运行时读取 ~/.secaudit/config.json 或 SECAUDIT_API_KEY；可选配置为 SECAUDIT_API_BASE_URL、SECAUDIT_MODEL、SECAUDIT_MAX_ITERATIONS、SECAUDIT_STRATEGY。";
@@ -138,7 +140,6 @@ const PREVIEW_TOOLS: Array<ToolCapability> = [
     ],
   },
 ];
-
 export function createPreviewWorkbench(request?: string): AgentWorkbench {
   const traceNow = createTimeLabel();
   const sessionNow = new Date().toISOString();
@@ -165,7 +166,6 @@ export function createPreviewWorkbench(request?: string): AgentWorkbench {
       statusDetail: "浏览器预览使用模拟工作台；真实 Agent 状态由 Tauri 后端提供。",
       busy: false,
       canSend: true,
-      canCancel: false,
       primaryActionLabel: "发送审计请求",
       pendingLabel: "预览运行中",
       pendingDetail: "浏览器预览正在生成模拟响应。",
@@ -223,7 +223,13 @@ export function createPreviewAgentEvents(request: string): Array<AgentEvent> {
     createPreviewAgentEvent(
       "tool_confirm",
       "工具确认请求",
-      "即将执行未知命令：npm audit --json，是否允许？",
+      `${PREVIEW_APPROVAL_PROMPT}\n\n等待用户确认。`,
+      {
+        approvalRequest: {
+          id: PREVIEW_APPROVAL_ID,
+          prompt: PREVIEW_APPROVAL_PROMPT,
+        },
+      },
     ),
     createPreviewAgentEvent("token", "流式输出", "再调用只读工具收集证据。"),
   ];
@@ -311,30 +317,31 @@ function createPreviewTrace(now: string): Array<TraceEvent> {
 function createPreviewFindings(): AgentWorkbench["findings"] {
   return [
     {
-      id: "preview-finding",
+      id: "preview-command-risk",
       status: "candidate",
       statusLabel: "候选",
-      severity: "pending",
-      severityLabel: "待确认",
-      confidenceLabel: "等待证据",
-      title: "候选发现会在 Agent 收集证据后出现",
-      location: "当前无真实扫描结果",
-      taxonomy: null,
-      summary: "浏览器预览不会执行真实扫描，只展示后端发现契约的结构化占位。",
+      severity: "high",
+      severityLabel: "高危",
+      confidenceLabel: "模型候选",
+      title: "高危：命令执行路径需要确认白名单边界",
+      location: "src-tauri/src/runtime.rs",
+      taxonomy: "CWE-78",
+      summary:
+        "预览输出模拟 Agent 从命令确认事件中提取的候选风险，真实结果由 Rust 后端从助手回复投影。",
       evidence: [
         {
-          label: "证据来源",
+          label: "确认请求",
           source: "运行轨迹",
-          detail: "等待工具调用、扫描输出或文件片段进入轨迹。",
+          detail: "工具请求执行 npm audit --json，GUI 会等待用户决策。",
         },
         {
-          label: "归因信息",
+          label: "Agent 输出",
           source: "Agent 输出",
-          detail: "等待模型给出 CWE、风险原因和影响范围。",
+          detail: "命令执行和脚本拼接路径需要验证参数来源、白名单和超时边界。",
         },
       ],
-      remediation: "确认证据后再生成具体修复建议。",
-      nextAction: "发送审计请求，让 Agent 收集证据并更新发现详情。",
+      remediation: "确认命令来源和参数约束后，再收敛允许列表或改为结构化工具调用。",
+      nextAction: "复核证据、定位代码片段，再让 Agent 生成最小修复建议。",
     },
   ];
 }
@@ -343,10 +350,15 @@ function createPreviewAgentEvent(
   kind: TraceEvent["kind"],
   title: string,
   detail: string,
+  options: Partial<Pick<AgentEvent, "approvalRequest" | "approvalResolution">> = {},
 ): AgentEvent {
   const trace = createTraceEvent(nextPreviewTraceId, kind, title, detail);
   nextPreviewTraceId += 1;
-  return { trace };
+  return {
+    trace,
+    approvalRequest: options.approvalRequest ?? null,
+    approvalResolution: options.approvalResolution ?? null,
+  };
 }
 
 function createTraceEvent(

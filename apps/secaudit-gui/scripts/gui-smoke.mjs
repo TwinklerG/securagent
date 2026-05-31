@@ -47,6 +47,10 @@ const BROWSER_FLAGS = [
 const SELECTORS = {
   appShell: '[data-testid="app-shell"]',
   assistantMarkdown: '[data-testid="assistant-markdown"]',
+  commandApprovalApprove: '[data-testid="command-approval-approve"]',
+  commandApprovalDeny: '[data-testid="command-approval-deny"]',
+  commandApprovalDialog: '[data-testid="command-approval-dialog"]',
+  commandApprovalPrompt: '[data-testid="command-approval-prompt"]',
   composerInput: '[data-testid="composer-input"]',
   findingConfidence: '[data-testid="finding-confidence"]',
   findingCount: '[data-testid="finding-count"]',
@@ -58,6 +62,7 @@ const SELECTORS = {
   findingSeverity: '[data-testid="finding-severity"]',
   findingStatus: '[data-testid="finding-status"]',
   findingTitle: '[data-testid="finding-title"]',
+  opsRail: '[data-testid="ops-rail"]',
   opsResizer: '[data-testid="ops-resizer"]',
   opsTabConfirm: '[data-testid="ops-tab-confirm"]',
   opsTabFindings: '[data-testid="ops-tab-findings"]',
@@ -71,8 +76,11 @@ const SELECTORS = {
   sessionItem: '[data-testid="session-item"]',
   sessionList: '[data-testid="session-list"]',
   toolConfirmCount: '[data-testid="tool-confirm-count"]',
+  toolConfirmDeniedStatus: '[data-testid="tool-confirm-status-denied"]',
+  toolConfirmDetail: '[data-testid="tool-confirm-detail"]',
   toolConfirmItem: '[data-testid="tool-confirm-item"]',
   toolConfirmList: '[data-testid="tool-confirm-list"]',
+  toolConfirmPendingStatus: '[data-testid="tool-confirm-status-pending"]',
   toolCount: '[data-testid="tool-count"]',
   toolGroupFile: '[data-testid="tool-group-文件"]',
   toolGroups: '[data-testid="tool-groups"]',
@@ -322,7 +330,8 @@ async function checkFindingPanel() {
         title: document.querySelector('${SELECTORS.findingTitle}')?.innerText ?? "",
         evidenceVisible: Boolean(document.querySelector('${SELECTORS.findingEvidenceList}')),
         nextAction: document.querySelector('${SELECTORS.findingNextAction}')?.innerText ?? "",
-        summaryVisible: text.includes("结构化占位") || text.includes("待验证的发现槽位"),
+        taxonomyVisible: text.includes("CWE-78"),
+        summaryVisible: text.includes("命令执行") && text.includes("Rust 后端"),
       };
     })()`,
     "候选发现详情状态",
@@ -333,11 +342,12 @@ async function checkFindingPanel() {
       panel.itemCount === 1 &&
       panel.evidenceCount >= 2 &&
       panel.statusLabel.includes("候选") &&
-      panel.severityLabel.includes("待确认") &&
-      panel.confidenceLabel.includes("等待证据") &&
-      panel.title.includes("候选发现") &&
+      panel.severityLabel.includes("高危") &&
+      panel.confidenceLabel.includes("模型候选") &&
+      panel.title.includes("命令执行") &&
       panel.evidenceVisible &&
-      panel.nextAction.includes("发送审计请求") &&
+      panel.taxonomyVisible &&
+      panel.nextAction.includes("复核证据") &&
       panel.summaryVisible,
     panel,
   );
@@ -680,6 +690,40 @@ async function checkTraceFiltersDuringRun() {
     toolFilter,
   );
 
+  await waitForExpression(
+    `document.querySelector('${SELECTORS.commandApprovalDialog}')?.innerText.includes("npm audit --json")`,
+  );
+  const approvalDialog = await evaluate(
+    `(() => ({
+      visible: Boolean(document.querySelector('${SELECTORS.commandApprovalDialog}')),
+      promptVisible: document.querySelector('${SELECTORS.commandApprovalPrompt}')?.innerText.includes("npm audit --json") ?? false,
+      approveVisible: Boolean(document.querySelector('${SELECTORS.commandApprovalApprove}')),
+      denyVisible: Boolean(document.querySelector('${SELECTORS.commandApprovalDeny}')),
+      compactBanner: (document.querySelector('${SELECTORS.commandApprovalDialog}')?.getBoundingClientRect().height ?? window.innerHeight) < window.innerHeight * 0.45,
+      keepsOpsRailVisible: (() => {
+        const dialog = document.querySelector('${SELECTORS.commandApprovalDialog}')?.getBoundingClientRect();
+        const opsRail = document.querySelector('${SELECTORS.opsRail}')?.getBoundingClientRect();
+        return Boolean(dialog && opsRail && dialog.right <= opsRail.left + 1);
+      })(),
+    }))()`,
+    "命令批准弹窗状态",
+  );
+  addCheck(
+    "命令批准显示主确认条",
+    approvalDialog.visible &&
+      approvalDialog.promptVisible &&
+      approvalDialog.approveVisible &&
+      approvalDialog.denyVisible &&
+      approvalDialog.compactBanner &&
+      approvalDialog.keepsOpsRailVisible,
+    approvalDialog,
+  );
+  await evaluate(
+    `document.querySelector('${SELECTORS.commandApprovalDeny}').click()`,
+    "拒绝预览命令批准",
+  );
+  await waitForExpression(`!document.querySelector('${SELECTORS.commandApprovalDialog}')`);
+
   await selectOpsTab(SELECTORS.opsTabConfirm, SELECTORS.toolConfirmList, "切换确认 tab");
   await waitForExpression(
     `document.querySelector('${SELECTORS.toolConfirmList}')?.innerText.includes('npm audit --json')`,
@@ -689,16 +733,22 @@ async function checkTraceFiltersDuringRun() {
       countLabel: document.querySelector('${SELECTORS.toolConfirmCount}')?.innerText ?? "",
       itemCount: document.querySelectorAll('${SELECTORS.toolConfirmItem}').length,
       promptVisible: document.querySelector('${SELECTORS.toolConfirmList}')?.innerText.includes("npm audit --json") ?? false,
-      conservativePolicyVisible: document.querySelector('${SELECTORS.toolConfirmList}')?.innerText.includes("已按保守策略拒绝") ?? false,
+      pendingStatusVisible: Boolean(document.querySelector('${SELECTORS.toolConfirmPendingStatus}')),
+      deniedStatusVisible: Boolean(document.querySelector('${SELECTORS.toolConfirmDeniedStatus}')),
+      staleHelpHidden: !document.querySelector('${SELECTORS.toolConfirmList}')?.innerText.includes("主确认弹窗负责批准操作"),
+      choiceLineHidden: !document.querySelector('${SELECTORS.toolConfirmDetail}')?.innerText.includes("用户选择"),
     }))()`,
     "工具确认请求提示状态",
   );
   addCheck(
-    "工具确认请求有明确提示",
+    "工具确认请求和结果合并为历史",
     confirmation.countLabel.includes("1") &&
-      confirmation.itemCount > 0 &&
+      confirmation.itemCount === 1 &&
       confirmation.promptVisible &&
-      confirmation.conservativePolicyVisible,
+      !confirmation.pendingStatusVisible &&
+      confirmation.deniedStatusVisible &&
+      confirmation.staleHelpHidden &&
+      confirmation.choiceLineHidden,
     confirmation,
   );
 

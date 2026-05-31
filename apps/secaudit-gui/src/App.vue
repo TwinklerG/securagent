@@ -1,20 +1,33 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import CommandApprovalDialog from "./components/CommandApprovalDialog.vue";
 import ConversationPane from "./components/ConversationPane.vue";
 import OpsRail from "./components/OpsRail.vue";
 import SessionRail from "./components/SessionRail.vue";
-import { OPS_RAIL_DEFAULT_WIDTH, SESSION_ID_PREVIEW_LENGTH, TRACE_LIMIT } from "./constants";
+import {
+  OPS_RAIL_DEFAULT_WIDTH,
+  SESSION_ID_PREVIEW_LENGTH,
+  SESSION_RAIL_WIDTH,
+  TRACE_LIMIT,
+} from "./constants";
 import {
   archiveSession,
   createSession,
   initWorkbench,
   listenAgentEvents,
+  resolveCommandApproval,
   selectWorkDir,
   sendAuditMessage,
   setWorkDir,
   switchSession,
 } from "./tauri";
-import type { AgentEvent, AgentWorkbench, GuiMessage, TraceEvent } from "./types";
+import type {
+  AgentEvent,
+  AgentWorkbench,
+  CommandApprovalRequest,
+  GuiMessage,
+  TraceEvent,
+} from "./types";
 
 const LIVE_ERROR_FALLBACK = "本轮运行失败，详情见运行轨迹和错误提示。";
 const LIVE_PENDING_FALLBACK = "Agent 正在分析当前审计请求。";
@@ -30,6 +43,9 @@ const liveAssistantSynthetic = ref(false);
 const switchingWorkDir = ref(false);
 const errorText = ref<string | null>(null);
 const opsRailWidth = ref(OPS_RAIL_DEFAULT_WIDTH);
+const pendingApproval = ref<CommandApprovalRequest | null>(null);
+const approvalPending = ref(false);
+const approvalErrorText = ref<string | null>(null);
 
 const backendMessages = computed<Array<GuiMessage>>(
   () => workbench.value?.conversation.messages ?? [],
@@ -60,7 +76,7 @@ const activeSessionLabel = computed(() => {
   return id ? id.slice(0, SESSION_ID_PREVIEW_LENGTH) : "未创建";
 });
 const shellStyle = computed(() => ({
-  gridTemplateColumns: `292px minmax(0, 1fr) ${opsRailWidth.value}px`,
+  gridTemplateColumns: `${SESSION_RAIL_WIDTH}px minmax(0, 1fr) ${opsRailWidth.value}px`,
 }));
 
 onMounted(async () => {
@@ -171,7 +187,37 @@ async function handleBrowseWorkDir(currentWorkDir: string) {
   }
 }
 
+async function handleResolveApproval(approved: boolean) {
+  const approval = pendingApproval.value;
+  if (!approval || approvalPending.value) {
+    return;
+  }
+
+  approvalPending.value = true;
+  approvalErrorText.value = null;
+  try {
+    await resolveCommandApproval(approval.id, approved);
+    pendingApproval.value = null;
+  } catch (error) {
+    approvalErrorText.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    approvalPending.value = false;
+  }
+}
+
 function handleAgentEvent(event: AgentEvent) {
+  if (event.approvalRequest) {
+    pendingApproval.value = event.approvalRequest;
+    approvalErrorText.value = null;
+  }
+  if (
+    event.approvalResolution &&
+    pendingApproval.value?.id === event.approvalResolution.id
+  ) {
+    pendingApproval.value = null;
+    approvalErrorText.value = null;
+  }
+
   if (!workbench.value) {
     return;
   }
@@ -309,6 +355,15 @@ function isPersistentTraceEvent(event: TraceEvent): boolean {
       :findings="findings"
       :width="opsRailWidth"
       @update-width="handleOpsRailWidth"
+    />
+
+    <CommandApprovalDialog
+      :approval="pendingApproval"
+      :busy="approvalPending"
+      :error-text="approvalErrorText"
+      :left-inset-px="SESSION_RAIL_WIDTH"
+      :right-inset-px="opsRailWidth"
+      @resolve="handleResolveApproval"
     />
   </main>
 </template>

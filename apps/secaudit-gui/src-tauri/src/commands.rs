@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::dto::AgentWorkbench;
-use crate::runtime::RuntimeState;
+use crate::runtime::{CommandApprovalBroker, RuntimeState};
 
 #[tauri::command]
 pub(crate) async fn init_workbench(
@@ -52,4 +52,18 @@ pub(crate) async fn set_work_dir(
 ) -> Result<AgentWorkbench, String> {
     let mut runtime = state.lock().await;
     runtime.set_work_dir(&app, &work_dir)
+}
+
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令注入 AppHandle 和 State 时使用按值参数"
+)]
+pub(crate) fn resolve_command_approval(
+    app: AppHandle,
+    approvals: State<'_, CommandApprovalBroker>,
+    id: u64,
+    approved: bool,
+) -> Result<(), String> {
+    approvals.resolve(&app, id, approved)
 }

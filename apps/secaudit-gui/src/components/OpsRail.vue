@@ -45,6 +45,7 @@ type ToolGroup = {
   risks: Array<ToolRiskSummary>;
   tools: Array<ToolCapability>;
 };
+type ToolConfirmStatusId = "pending" | "approved" | "denied" | "timeout" | "record";
 type TraceDetailField = {
   key: string;
   label: string;
@@ -102,6 +103,31 @@ const TRACE_KIND_BADGE_CLASS_BY_VALUE: Record<TraceEvent["kind"], string> = {
   tool_result: "border-[#b8c8d5] bg-[#e4ecf2] text-[#365d78]",
   error: "border-[#d8847b] bg-[#fff1ee] text-[#9b2d25]",
 };
+const TOOL_CONFIRM_STATUS_LABEL_BY_ID: Record<ToolConfirmStatusId, string> = {
+  pending: "待确认",
+  approved: "已允许",
+  denied: "已拒绝",
+  timeout: "超时拒绝",
+  record: "记录",
+};
+const TOOL_CONFIRM_STATUS_CLASS_BY_ID: Record<ToolConfirmStatusId, string> = {
+  pending: "border-[#e1c27c] bg-[#fff1d5] text-[#805100]",
+  approved: "border-[#b8cec1] bg-[#e5efe7] text-[#2f765e]",
+  denied: "border-[#d8847b] bg-[#fff1ee] text-[#9b2d25]",
+  timeout: "border-[#dd9c75] bg-[#fff0e4] text-[#944315]",
+  record: "border-[#cfc6b8] bg-[#eee7dc] text-[#4c584d]",
+};
+const TOOL_CONFIRM_STATUS_BADGE_BASE =
+  "inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] font-black";
+const TOOL_CONFIRM_WAITING_DETAILS = [
+  "等待你在主确认弹窗中批准或拒绝。右侧确认页会保留历史记录。",
+  "等待用户确认。",
+  "用户选择：已允许。",
+  "用户选择：已拒绝。",
+  "批准请求超时，已按拒绝处理。",
+  "预览确认结果：已允许。",
+  "预览确认结果：已拒绝。",
+];
 
 const TRACE_FILTERS: Array<{
   id: TraceFilterId;
@@ -146,7 +172,7 @@ const filteredTrace = computed(() => {
 });
 
 const toolGroups = computed<Array<ToolGroup>>(() => groupToolsByCategory(props.tools));
-const toolConfirmEvents = computed(() => props.trace.filter((item) => item.kind === "tool_confirm"));
+const toolConfirmEvents = computed(() => mergeToolConfirmEvents(props.trace));
 const tabItems = computed(() => [
   { id: "trace" as const, label: "轨迹", count: props.trace.length, icon: History },
   { id: "confirm" as const, label: "确认", count: toolConfirmEvents.value.length, icon: ShieldAlert },
@@ -284,6 +310,73 @@ function traceKindBadgeClass(kind: TraceEvent["kind"]): string {
 
 function traceKindLabel(kind: TraceEvent["kind"]): string {
   return TRACE_KIND_LABEL_BY_VALUE[kind];
+}
+
+function mergeToolConfirmEvents(trace: Array<TraceEvent>): Array<TraceEvent> {
+  const merged = new Map<string, TraceEvent>();
+  for (const event of trace) {
+    if (event.kind !== "tool_confirm") {
+      continue;
+    }
+
+    const key = toolConfirmMergeKey(event);
+    const previous = merged.get(key);
+    if (!previous || toolConfirmStatusRank(event) > toolConfirmStatusRank(previous)) {
+      merged.set(key, event);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function toolConfirmMergeKey(event: TraceEvent): string {
+  return toolConfirmDetail(event) || event.detail.trim() || `${event.title}-${event.id}`;
+}
+
+function toolConfirmStatusRank(event: TraceEvent): number {
+  const rank: Record<ToolConfirmStatusId, number> = {
+    record: 0,
+    pending: 1,
+    timeout: 2,
+    denied: 3,
+    approved: 3,
+  };
+  return rank[toolConfirmStatusId(event)];
+}
+
+function toolConfirmStatusId(event: TraceEvent): ToolConfirmStatusId {
+  if (event.detail.includes("已超时拒绝") || event.title.includes("超时")) {
+    return "timeout";
+  }
+  if (event.detail.includes("已拒绝")) {
+    return "denied";
+  }
+  if (event.detail.includes("已允许")) {
+    return "approved";
+  }
+  if (event.title.includes("请求")) {
+    return "pending";
+  }
+  return "record";
+}
+
+function toolConfirmStatusClass(event: TraceEvent): string {
+  return `${TOOL_CONFIRM_STATUS_BADGE_BASE} ${TOOL_CONFIRM_STATUS_CLASS_BY_ID[toolConfirmStatusId(event)]}`;
+}
+
+function toolConfirmStatusLabel(event: TraceEvent): string {
+  return TOOL_CONFIRM_STATUS_LABEL_BY_ID[toolConfirmStatusId(event)];
+}
+
+function toolConfirmStatusTestId(event: TraceEvent): string {
+  return `tool-confirm-status-${toolConfirmStatusId(event)}`;
+}
+
+function toolConfirmDetail(event: TraceEvent): string {
+  let detail = event.detail.trim();
+  for (const waitingDetail of TOOL_CONFIRM_WAITING_DETAILS) {
+    detail = detail.replaceAll(waitingDetail, " ");
+  }
+  return detail.replace(/\s+/g, " ").trim();
 }
 
 function traceDetail(item: TraceEvent): string {
@@ -431,6 +524,7 @@ function findingStatusClass(status: FindingPreview["status"]): string {
 <template>
   <aside
     class="relative flex min-h-0 flex-col border-l border-[rgba(39,48,40,0.18)] bg-[rgba(247,244,236,0.94)]"
+    data-testid="ops-rail"
   >
     <button
       type="button"
@@ -600,7 +694,7 @@ function findingStatusClass(status: FindingPreview["status"]): string {
       <div class="mb-2.5 flex items-center justify-between gap-2">
         <div class="flex min-w-0 items-center gap-2 text-[13px] font-black text-[#62440f]">
           <ShieldAlert :size="17" />
-          <span>确认请求</span>
+          <span>确认历史</span>
         </div>
         <span
           class="rounded-full border border-[#e1c27c] bg-[#fff1d5] px-2 py-1 text-[11px] font-black text-[#805100]"
@@ -616,22 +710,24 @@ function findingStatusClass(status: FindingPreview["status"]): string {
           class="rounded-lg border border-[#e1c27c] bg-[#fff8e6] p-2.5"
           data-testid="tool-confirm-item"
         >
-          <div class="flex items-center gap-1.5">
+          <div class="flex items-start gap-1.5">
             <strong class="min-w-0 flex-1 text-xs font-black text-[#3b2b10]">
               {{ event.title }}
             </strong>
+            <span :class="toolConfirmStatusClass(event)" :data-testid="toolConfirmStatusTestId(event)">
+              {{ toolConfirmStatusLabel(event) }}
+            </span>
             <time class="text-[11px] text-[#805100]">{{ event.occurredAt }}</time>
           </div>
           <p
+            v-if="toolConfirmDetail(event).length > 0"
             class="mt-2 max-h-32 overflow-auto whitespace-pre-wrap text-xs leading-[1.45] text-[#62440f] [overflow-wrap:anywhere]"
+            data-testid="tool-confirm-detail"
           >
-            {{ event.detail }}
+            {{ toolConfirmDetail(event) }}
           </p>
-          <span class="mt-2 inline-flex text-[11px] font-black text-[#805100]">
-            已按保守策略拒绝
-          </span>
         </article>
-        <p v-if="toolConfirmEvents.length === 0" class="text-xs text-[#667166]">暂无确认请求</p>
+        <p v-if="toolConfirmEvents.length === 0" class="text-xs text-[#667166]">暂无确认记录</p>
       </div>
     </section>
 

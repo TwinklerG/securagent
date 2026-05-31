@@ -6,7 +6,7 @@ mod tools;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-use runtime::GuiRuntime;
+use runtime::{CommandApprovalBroker, GuiRuntime};
 
 /// 启动 Tauri 桌面应用。
 ///
@@ -17,7 +17,9 @@ pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let runtime = GuiRuntime::new(app.handle())?;
+            let approvals = CommandApprovalBroker::new();
+            let runtime = GuiRuntime::new(app.handle(), approvals.clone())?;
+            app.manage(approvals);
             app.manage(Mutex::new(runtime));
             Ok(())
         })
@@ -27,7 +29,8 @@ pub fn run() -> tauri::Result<()> {
             commands::new_session,
             commands::switch_session,
             commands::archive_session,
-            commands::set_work_dir
+            commands::set_work_dir,
+            commands::resolve_command_approval
         ])
         .run(tauri::generate_context!())
 }
