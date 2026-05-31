@@ -1,10 +1,12 @@
 // Agent 模块：ReAct 循环与审计流程编排
 
 pub mod executor;
+pub(crate) mod skill_tool;
 pub mod state;
 pub mod strategy;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::Error;
@@ -133,7 +135,7 @@ pub struct Agent {
     /// 事件总线：状态与回调管理
     events: EventBus,
     /// Skill 注册表
-    skill_registry: Option<SkillRegistry>,
+    skill_registry: Option<Arc<SkillRegistry>>,
     /// 工作目录
     work_dir: PathBuf,
 }
@@ -202,10 +204,14 @@ impl Agent {
     #[must_use]
     pub fn new(config: Config, work_dir: PathBuf, confirm: ConfirmFn) -> Self {
         let llm = llm::create_client(&config);
-        let tools = tools::default_tools(work_dir.clone(), confirm);
+        let mut tools = tools::default_tools(work_dir.clone(), confirm);
         let skill_registry = if config.enable_skills {
             match SkillRegistry::load_from_dir(&work_dir) {
-                Ok(registry) => Some(registry),
+                Ok(registry) => {
+                    let arc = Arc::new(registry);
+                    tools.push(Box::new(skill_tool::UseSkillTool::new(arc.clone())));
+                    Some(arc)
+                }
                 Err(err) => {
                     tracing::warn!("加载 Skills 失败，已禁用 Skill 匹配：{err}");
                     None
@@ -283,7 +289,7 @@ impl Agent {
     pub fn skill_list(&self) -> Vec<(String, String)> {
         self.skill_registry
             .as_ref()
-            .map(SkillRegistry::list)
+            .map(|r| r.list())
             .unwrap_or_default()
     }
 
@@ -420,7 +426,12 @@ impl Agent {
         self.events.set_state(AgentState::Init);
 
         // 单文件审计使用受限工具集
-        let audit_tools = tools::audit_tools();
+        let mut audit_tools = tools::audit_tools();
+        if let Some(registry) = &self.skill_registry {
+            audit_tools.push(Box::new(skill_tool::UseSkillTool::new(Arc::clone(
+                registry,
+            ))));
+        }
         let mut executor = ReActExecutor::new(&self.llm, &audit_tools);
 
         // 1. 系统 prompt

@@ -38,6 +38,7 @@ pub fn chat_system_prompt(work_dir: &Path) -> String {
 - 查询 CVE 信息（nvd_lookup）
 - 执行命令验证问题（execute_command）— 编译、运行测试、执行安全工具等
 - 写入文件（write_file）— 生成修复补丁、PoC 脚本、安全报告等
+- 激活预设技能（use_skill）— 调用预设的专业技能完成文本改写、格式化、特定分析等任务
 
 ## 工作原则
 
