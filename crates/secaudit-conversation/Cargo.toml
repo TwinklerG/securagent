@@ -4,13 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-dirs = "6"
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "serde",
+] }
 secaudit-agent = { path = "../secaudit-agent" }
+secaudit-storage = { path = "../secaudit-storage" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

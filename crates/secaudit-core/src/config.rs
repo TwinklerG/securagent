@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use secaudit_storage::RUNTIME_DIR;
+
 use crate::error::Error;
 
 const ENV_API_KEY: &str = "SECAUDIT_API_KEY";
@@ -10,7 +12,7 @@ const ENV_MODEL: &str = "SECAUDIT_MODEL";
 const ENV_MAX_ITERATIONS: &str = "SECAUDIT_MAX_ITERATIONS";
 const ENV_STRATEGY: &str = "SECAUDIT_STRATEGY";
 const ENV_ENABLE_SKILLS: &str = "SECAUDIT_ENABLE_SKILLS";
-const RUNTIME_DIR: &str = ".secaudit";
+
 const CONFIG_FILE: &str = "config.json";
 
 /// 默认 API 基础 URL
@@ -246,12 +248,14 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::config::CONFIG_FILE;
+
     use super::{Config, ENV_API_BASE_URL, ENV_API_KEY, ENV_ENABLE_SKILLS, ENV_MODEL};
 
     #[test]
     fn from_file_loads_partial_json_with_defaults() {
         let temp = TempDir::new().expect("create tempdir");
-        let config_path = temp.path().join("config.json");
+        let config_path = temp.path().join(CONFIG_FILE);
         fs::write(
             &config_path,
             r#"{
@@ -273,7 +277,7 @@ mod tests {
     #[test]
     fn load_with_sources_prefers_environment_over_file() {
         let temp = TempDir::new().expect("create tempdir");
-        let config_path = temp.path().join("config.json");
+        let config_path = temp.path().join(CONFIG_FILE);
         fs::write(
             &config_path,
             r#"{

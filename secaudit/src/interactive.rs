@@ -173,13 +173,16 @@ mod tests {
         start_worker_session,
     };
 
+    const PROJECT_DIR: &str = "project";
+    const RUNTIME_DIR: &str = "runtime";
+
     #[test]
     fn worker_session_uses_conversation_storage() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
         let service =
-            ConversationService::new(ConversationConfig::with_root(temp.path().join("runtime")));
+            ConversationService::new(ConversationConfig::with_root(temp.path().join(RUNTIME_DIR)));
 
         let mut managed = start_worker_session(&service, &work_dir).expect("start worker session");
         assert!(
@@ -223,10 +226,10 @@ mod tests {
     #[test]
     fn session_snapshot_keeps_user_and_agent_messages_for_tui() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
         let service =
-            ConversationService::new(ConversationConfig::with_root(temp.path().join("runtime")));
+            ConversationService::new(ConversationConfig::with_root(temp.path().join(RUNTIME_DIR)));
         let mut managed = start_worker_session(&service, &work_dir).expect("start worker session");
 
         managed
@@ -269,10 +272,10 @@ mod tests {
     #[test]
     fn session_preview_lists_recent_user_or_agent_message() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
         let service =
-            ConversationService::new(ConversationConfig::with_root(temp.path().join("runtime")));
+            ConversationService::new(ConversationConfig::with_root(temp.path().join(RUNTIME_DIR)));
         let mut managed = start_worker_session(&service, &work_dir).expect("start worker session");
 
         managed
@@ -306,10 +309,10 @@ mod tests {
     #[test]
     fn session_selector_supports_one_based_indices() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
         let service =
-            ConversationService::new(ConversationConfig::with_root(temp.path().join("runtime")));
+            ConversationService::new(ConversationConfig::with_root(temp.path().join(RUNTIME_DIR)));
         let mut managed = start_worker_session(&service, &work_dir).expect("start worker session");
         managed
             .session_mut()

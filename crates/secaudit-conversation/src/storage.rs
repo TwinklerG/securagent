@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use uuid::Uuid;
+use secaudit_storage::{FileLock, RuntimeLayout, canonical_work_dir};
 
 use crate::error::{Error, Result};
 use crate::model::{
@@ -14,95 +12,98 @@ use crate::model::{
     SessionStatus, StoredSession, has_persistable_messages,
 };
 
-const RUNTIME_DIR: &str = ".secaudit";
-const PROJECTS_DIR: &str = "projects";
-const PROJECT_FILE: &str = "project.json";
-const SESSIONS_DIR: &str = "sessions";
-const INDEX_FILE: &str = "index.jsonl";
-const MEMORY_DIR: &str = "memory";
-const TOOL_CONFIG_DIR: &str = "tool-config";
-const SKILLS_DIR: &str = "skills";
 const INDEX_COMPACT_MIN_BYTES: u64 = 16 * 1024;
 const INDEX_COMPACT_DUPLICATE_RATIO: usize = 2;
-const INDEX_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const INDEX_LOCK_MAX_POLLS: usize = 1_000;
-const INDEX_LOCK_STALE_AFTER: Duration = Duration::from_mins(5);
 
-/// 用户级运行时存储布局。
+/// 会话级持久化布局。
+///
+/// 在 `RuntimeLayout` 提供的文件系统布局之上叠加会话创建、
+/// 保存、加载、列表、归档等业务操作。
 #[derive(Debug, Clone)]
-pub struct StorageLayout {
-    root: PathBuf,
+pub struct ConversationLayout {
+    runtime: RuntimeLayout,
 }
 
-impl StorageLayout {
+impl ConversationLayout {
     /// 使用默认 `~/.secaudit` 根目录。
     ///
     /// # Errors
     ///
     /// 无法推导用户 home 目录时返回错误。
     pub fn default_root() -> Result<Self> {
-        let home_dir = dirs::home_dir().ok_or(Error::MissingHome)?;
-        Ok(Self::new(home_dir.join(RUNTIME_DIR)))
+        let runtime = RuntimeLayout::default_root()?;
+        Ok(Self { runtime })
     }
 
     /// 使用指定根目录，主要用于测试和显式配置。
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            runtime: RuntimeLayout::new(root),
+        }
     }
 
     /// 存储根目录。
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.root
+        self.runtime.root()
     }
+
+    /// 对内 `RuntimeLayout` 的只读访问。
+    #[must_use]
+    pub fn runtime(&self) -> &RuntimeLayout {
+        &self.runtime
+    }
+
+    // ── 路径构建（委托给 RuntimeLayout）──────────────────────────────────────
 
     /// 项目目录。
     #[must_use]
     pub fn project_dir(&self, key: &ProjectKey) -> PathBuf {
-        self.root.join(PROJECTS_DIR).join(key.as_str())
+        self.runtime.project_dir(key.as_str())
     }
 
     /// 项目元数据文件。
     #[must_use]
     pub fn project_file(&self, key: &ProjectKey) -> PathBuf {
-        self.project_dir(key).join(PROJECT_FILE)
+        self.runtime.project_file(key.as_str())
     }
 
     /// 会话目录。
     #[must_use]
     pub fn sessions_dir(&self, key: &ProjectKey) -> PathBuf {
-        self.project_dir(key).join(SESSIONS_DIR)
+        self.runtime.sessions_dir(key.as_str())
     }
 
     /// 项目记忆目录。
     #[must_use]
     pub fn memory_dir(&self, key: &ProjectKey) -> PathBuf {
-        self.project_dir(key).join(MEMORY_DIR)
+        self.runtime.memory_dir(key.as_str())
     }
 
     /// 项目工具动态配置目录。
     #[must_use]
     pub fn tool_config_dir(&self, key: &ProjectKey) -> PathBuf {
-        self.project_dir(key).join(TOOL_CONFIG_DIR)
+        self.runtime.tool_config_dir(key.as_str())
     }
 
     /// 项目 Skill 动态配置目录。
     #[must_use]
     pub fn skills_dir(&self, key: &ProjectKey) -> PathBuf {
-        self.project_dir(key).join(SKILLS_DIR)
+        self.runtime.skills_dir(key.as_str())
     }
 
     /// 会话索引文件。
     #[must_use]
     pub fn session_index_file(&self, key: &ProjectKey) -> PathBuf {
-        self.sessions_dir(key).join(INDEX_FILE)
+        self.runtime.session_index_file(key.as_str())
     }
 
-    /// active/archived 会话子目录。
+    /// Active / Archived 会话子目录。
     #[must_use]
     pub fn session_status_dir(&self, key: &ProjectKey, status: SessionStatus) -> PathBuf {
-        self.sessions_dir(key).join(status.directory())
+        self.runtime
+            .session_status_dir(key.as_str(), status.directory())
     }
 
     /// 会话文件路径。
@@ -113,9 +114,11 @@ impl StorageLayout {
         status: SessionStatus,
         session_id: &str,
     ) -> PathBuf {
-        self.session_status_dir(key, status)
-            .join(format!("{session_id}.json"))
+        self.runtime
+            .session_file(key.as_str(), status.directory(), session_id)
     }
+
+    // ── 项目初始化和会话操作 ────────────────────────────────────────────────
 
     /// 初始化项目目录与元数据。
     ///
@@ -127,11 +130,7 @@ impl StorageLayout {
         let key = self.project_key_for_path(&canonical_path)?;
         let now = now_rfc3339();
 
-        fs::create_dir_all(self.session_status_dir(&key, SessionStatus::Active))?;
-        fs::create_dir_all(self.session_status_dir(&key, SessionStatus::Archived))?;
-        fs::create_dir_all(self.memory_dir(&key))?;
-        fs::create_dir_all(self.tool_config_dir(&key))?;
-        fs::create_dir_all(self.skills_dir(&key))?;
+        self.runtime.ensure_project_dirs(key.as_str())?;
 
         let project_file = self.project_file(&key);
         let metadata = if project_file.exists() {
@@ -149,44 +148,8 @@ impl StorageLayout {
             }
         };
 
-        Self::write_json_atomic(&project_file, &metadata)?;
+        RuntimeLayout::write_json_atomic(&project_file, &metadata)?;
         Ok(metadata)
-    }
-
-    fn project_key_for_path(&self, canonical_path: &Path) -> Result<ProjectKey> {
-        let base_key = ProjectKey::from_path(canonical_path);
-        let base_file = self.project_file(&base_key);
-        if !base_file.exists() {
-            return Ok(base_key);
-        }
-
-        let metadata = read_project_metadata(&base_file)?;
-        if metadata.canonical_path == canonical_path {
-            return Ok(base_key);
-        }
-
-        let suffix = stable_path_suffix(canonical_path);
-        for counter in 0..100u8 {
-            let candidate_suffix = if counter == 0 {
-                suffix.clone()
-            } else {
-                format!("{suffix}-{counter}")
-            };
-            let candidate = base_key.with_suffix(&candidate_suffix);
-            let candidate_file = self.project_file(&candidate);
-            if !candidate_file.exists() {
-                return Ok(candidate);
-            }
-
-            let metadata = read_project_metadata(&candidate_file)?;
-            if metadata.canonical_path == canonical_path {
-                return Ok(candidate);
-            }
-        }
-
-        Err(Error::PathConflict {
-            path: self.project_dir(&base_key),
-        })
     }
 
     /// 创建新会话。
@@ -224,11 +187,7 @@ impl StorageLayout {
         let stored = session.to_stored_session(updated_at);
         let path = self.session_file(session.project_key(), stored.status, &stored.id);
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        Self::write_json_atomic(&path, &stored)?;
+        RuntimeLayout::write_json_atomic(&path, &stored)?;
         self.remove_opposite_status_file(session.project_key(), stored.status, &stored.id)?;
         let metadata = SessionMetadata::from_stored_session(&stored);
         self.append_session_index(session.project_key(), &metadata)?;
@@ -298,16 +257,13 @@ impl StorageLayout {
 
         let archived_path =
             self.session_file(&project.project_key, SessionStatus::Archived, session_id);
-        if let Some(parent) = archived_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         if archived_path.exists() {
-            return Err(Error::PathConflict {
+            return Err(Error::Storage(secaudit_storage::Error::PathConflict {
                 path: archived_path,
-            });
+            }));
         }
 
-        Self::write_json_atomic(&archived_path, &stored)?;
+        RuntimeLayout::write_json_atomic(&archived_path, &stored)?;
         fs::remove_file(&active_path)?;
 
         let metadata = SessionMetadata::from_stored_session(&stored);
@@ -320,6 +276,46 @@ impl StorageLayout {
     pub fn session_path(&self, session: &ManagedSession) -> PathBuf {
         self.session_file(session.project_key(), session.status(), session.id())
     }
+
+    // ── 项目键管理 ──────────────────────────────────────────────────────────
+
+    fn project_key_for_path(&self, canonical_path: &Path) -> Result<ProjectKey> {
+        let base_key = ProjectKey::from_path(canonical_path);
+        let base_file = self.project_file(&base_key);
+        if !base_file.exists() {
+            return Ok(base_key);
+        }
+
+        let metadata = read_project_metadata(&base_file)?;
+        if metadata.canonical_path == canonical_path {
+            return Ok(base_key);
+        }
+
+        let suffix = stable_path_suffix(canonical_path);
+        for counter in 0..100u8 {
+            let candidate_suffix = if counter == 0 {
+                suffix.clone()
+            } else {
+                format!("{suffix}-{counter}")
+            };
+            let candidate = base_key.with_suffix(&candidate_suffix);
+            let candidate_file = self.project_file(&candidate);
+            if !candidate_file.exists() {
+                return Ok(candidate);
+            }
+
+            let metadata = read_project_metadata(&candidate_file)?;
+            if metadata.canonical_path == canonical_path {
+                return Ok(candidate);
+            }
+        }
+
+        Err(Error::Storage(secaudit_storage::Error::PathConflict {
+            path: self.project_dir(&base_key),
+        }))
+    }
+
+    // ── 会话查询 ────────────────────────────────────────────────────────────
 
     fn list_sessions_for_project(&self, key: &ProjectKey) -> Result<Vec<SessionMetadata>> {
         let index_file = self.session_index_file(key);
@@ -353,13 +349,13 @@ impl StorageLayout {
         })
     }
 
+    // ── 索引管理 ────────────────────────────────────────────────────────────
+
     fn append_session_index(&self, key: &ProjectKey, metadata: &SessionMetadata) -> Result<()> {
         let index_file = self.session_index_file(key);
-        if let Some(parent) = index_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        RuntimeLayout::ensure_dir(&self.runtime.sessions_dir(key.as_str()))?;
 
-        let _lock = IndexWriteLock::acquire(&index_file)?;
+        let _lock = FileLock::acquire(&index_file)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -405,84 +401,13 @@ impl StorageLayout {
         }
         Ok(())
     }
-
-    fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let tmp_path = atomic_tmp_path(path);
-        {
-            let mut file = File::create(&tmp_path)?;
-            serde_json::to_writer_pretty(&mut file, value)?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-        }
-        fs::rename(tmp_path, path)?;
-        Ok(())
-    }
 }
+
+// ── 会话索引 ──────────────────────────────────────────────────────────────────
 
 struct SessionIndex {
     record_count: usize,
     by_id: BTreeMap<String, SessionMetadata>,
-}
-
-struct IndexWriteLock {
-    path: PathBuf,
-}
-
-impl IndexWriteLock {
-    fn acquire(index_file: &Path) -> Result<Self> {
-        let lock_path = index_file.with_extension("jsonl.lock");
-        for _ in 0..INDEX_LOCK_MAX_POLLS {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Self { path: lock_path }),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    remove_stale_index_lock(&lock_path)?;
-                    thread::sleep(INDEX_LOCK_POLL_INTERVAL);
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-
-        Err(io::Error::new(
-            ErrorKind::TimedOut,
-            format!("等待会话索引锁超时：{}", lock_path.display()),
-        )
-        .into())
-    }
-}
-
-impl Drop for IndexWriteLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn remove_stale_index_lock(lock_path: &Path) -> Result<()> {
-    let Ok(metadata) = fs::metadata(lock_path) else {
-        return Ok(());
-    };
-    let Ok(modified) = metadata.modified() else {
-        return Ok(());
-    };
-    let Ok(age) = SystemTime::now().duration_since(modified) else {
-        return Ok(());
-    };
-    if age <= INDEX_LOCK_STALE_AFTER {
-        return Ok(());
-    }
-
-    match fs::remove_file(lock_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
 }
 
 impl SessionIndex {
@@ -531,24 +456,11 @@ fn read_session_index(index_file: &Path) -> Result<SessionIndex> {
 }
 
 fn write_session_index_atomic(index_file: &Path, sessions: &[SessionMetadata]) -> Result<()> {
-    let tmp_path = atomic_tmp_path(index_file);
-    {
-        let mut file = File::create(&tmp_path)?;
-        for session in sessions {
-            serde_json::to_writer(&mut file, session)?;
-            file.write_all(b"\n")?;
-        }
-        file.sync_all()?;
-    }
-    fs::rename(tmp_path, index_file)?;
+    RuntimeLayout::write_jsonl_atomic(index_file, sessions)?;
     Ok(())
 }
 
-fn canonical_work_dir(work_dir: &Path) -> PathBuf {
-    work_dir
-        .canonicalize()
-        .unwrap_or_else(|_| work_dir.to_path_buf())
-}
+// ── 助手函数 ──────────────────────────────────────────────────────────────────
 
 fn read_project_metadata(path: &Path) -> Result<ProjectMetadata> {
     let content = fs::read_to_string(path)?;
@@ -566,17 +478,6 @@ fn stable_path_suffix(path: &Path) -> String {
     }
 
     format!("{:08x}", hash & 0xffff_ffff)
-}
-
-fn atomic_tmp_path(path: &Path) -> PathBuf {
-    let tmp_name = format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("secaudit"),
-        Uuid::new_v4()
-    );
-    path.with_file_name(tmp_name)
 }
 
 fn validate_session_id(session_id: &str) -> Result<()> {
@@ -598,6 +499,8 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
 
+// ── 测试 ──────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -605,8 +508,11 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::StorageLayout;
+    use super::ConversationLayout;
     use crate::model::{ProjectKey, SessionStatus};
+
+    const PROJECT_DIR: &str = "project";
+    const RUNTIME_DIR: &str = "runtime";
 
     #[test]
     fn project_key_is_readable_path_encoding() {
@@ -618,9 +524,9 @@ mod tests {
     #[test]
     fn creates_lists_loads_and_archives_session() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
-        let storage = StorageLayout::new(temp.path().join("runtime"));
+        let storage = ConversationLayout::new(temp.path().join(RUNTIME_DIR));
 
         let session = storage.create_session(&work_dir).expect("create session");
         let session_id = session.id().to_owned();
@@ -671,9 +577,9 @@ mod tests {
     #[test]
     fn repeated_session_saves_compact_index_to_latest_metadata() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
-        let storage = StorageLayout::new(temp.path().join("runtime"));
+        let storage = ConversationLayout::new(temp.path().join(RUNTIME_DIR));
         let project = storage.ensure_project(&work_dir).expect("ensure project");
         let mut session = storage.create_session(&work_dir).expect("create session");
         let session_id = session.id().to_owned();
@@ -715,9 +621,9 @@ mod tests {
     #[test]
     fn rejects_path_like_session_id() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
-        let storage = StorageLayout::new(temp.path().join("runtime"));
+        let storage = ConversationLayout::new(temp.path().join(RUNTIME_DIR));
 
         let result = storage.load_session(&work_dir, "../bad").err();
 
@@ -727,9 +633,9 @@ mod tests {
     #[test]
     fn rejects_empty_session_save() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
-        let storage = StorageLayout::new(temp.path().join("runtime"));
+        let storage = ConversationLayout::new(temp.path().join(RUNTIME_DIR));
 
         let session = storage.create_session(&work_dir).expect("create session");
 
@@ -741,9 +647,9 @@ mod tests {
     #[test]
     fn ensure_project_creates_shared_runtime_dirs() {
         let temp = TempDir::new().expect("create tempdir");
-        let work_dir = temp.path().join("project");
+        let work_dir = temp.path().join(PROJECT_DIR);
         fs::create_dir_all(&work_dir).expect("create work dir");
-        let storage = StorageLayout::new(temp.path().join("runtime"));
+        let storage = ConversationLayout::new(temp.path().join(RUNTIME_DIR));
 
         let project = storage.ensure_project(&work_dir).expect("ensure project");
 
@@ -759,7 +665,7 @@ mod tests {
         let second = temp.path().join("a").join("b");
         fs::create_dir_all(&first).expect("create first work dir");
         fs::create_dir_all(&second).expect("create second work dir");
-        let storage = StorageLayout::new(temp.path().join("runtime"));
+        let storage = ConversationLayout::new(temp.path().join(RUNTIME_DIR));
 
         let first_project = storage.ensure_project(&first).expect("ensure first");
         let second_project = storage.ensure_project(&second).expect("ensure second");

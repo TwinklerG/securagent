@@ -14,4 +14,4 @@ pub use model::{
 };
 pub use service::{ConversationConfig, ConversationService};
 pub use sliding_window::SlidingWindowPolicy;
-pub use storage::StorageLayout;
+pub use storage::ConversationLayout;

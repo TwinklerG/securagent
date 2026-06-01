@@ -7,6 +7,7 @@ edition = "2024"
 gray_matter = "0.3"
 serde_yaml = "0.9"
 secaudit-core = { path = "../secaudit-core" }
+secaudit-storage = { path = "../secaudit-storage" }
 
 [lints]
 workspace = true

@@ -1,16 +1,14 @@
 //! 简单的 Skill 文件加载器。
 
 use std::collections::HashMap;
-use std::env::var_os;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use gray_matter::{Matter, engine::YAML};
 use secaudit_core::Error;
+use secaudit_storage::RuntimeLayout;
 use serde_yaml::Value;
 
-const SECAUDIT_DIR: &str = ".secaudit";
-const SKILLS_DIR: &str = "skills";
 const SKILL_FILE: &str = "SKILL.md";
 
 /// 从 Markdown 文件加载的 Skill。
@@ -192,11 +190,11 @@ fn match_skill_name(name: &str, input: &str) -> bool {
 fn skill_search_dirs(base_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(home_dir) = var_os("HOME").map(PathBuf::from) {
-        dirs.push(home_dir.join(SECAUDIT_DIR).join(SKILLS_DIR));
+    if let Ok(layout) = RuntimeLayout::default_root() {
+        dirs.push(layout.user_skills_dir());
     }
 
-    dirs.push(base_dir.join(SECAUDIT_DIR).join(SKILLS_DIR));
+    dirs.push(RuntimeLayout::new(base_dir.to_path_buf()).user_skills_dir());
     dirs
 }
 

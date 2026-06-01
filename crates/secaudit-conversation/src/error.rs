@@ -1,5 +1,4 @@
 use std::io;
-use std::path::PathBuf;
 
 use secaudit_agent::error::Error as AgentError;
 use std::result;
@@ -7,9 +6,9 @@ use std::result;
 /// 会话持久化与历史管理错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 无法推导默认存储根目录。
-    #[error("无法推导默认持久化根目录")]
-    MissingHome,
+    /// 底层存储错误（`MissingHome` / `PathConflict` 等）。
+    #[error(transparent)]
+    Storage(#[from] secaudit_storage::Error),
 
     /// 会话 ID 不合法。
     #[error("会话 ID 不合法：{session_id}")]
@@ -26,10 +25,6 @@ pub enum Error {
     /// 空会话不应持久化。
     #[error("空会话不会持久化：{session_id}")]
     EmptySession { session_id: String },
-
-    /// 已存在同名路径，不能安全写入。
-    #[error("目标路径已存在且不能安全覆盖：{path}")]
-    PathConflict { path: PathBuf },
 
     /// JSON 序列化或解析失败。
     #[error("JSON 处理失败：{0}")]

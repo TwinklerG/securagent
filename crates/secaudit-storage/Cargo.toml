@@ -1,15 +1,13 @@
 [package]
-name = "secaudit-core"
+name = "secaudit-storage"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dirs = "6"
 serde.workspace = true
 serde_json.workspace = true
-secaudit-storage = { path = "../secaudit-storage" }
 thiserror.workspace = true
-secaudit-llm = { path = "../secaudit-llm" }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

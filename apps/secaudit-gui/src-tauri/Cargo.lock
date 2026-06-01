@@ -3262,12 +3262,11 @@ name = "secaudit-conversation"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dirs",
  "secaudit-agent",
+ "secaudit-storage",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "uuid",
 ]
 
 [[package]]
@@ -3276,6 +3275,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "secaudit-llm",
+ "secaudit-storage",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3315,7 +3315,19 @@ version = "0.1.0"
 dependencies = [
  "gray_matter",
  "secaudit-core",
+ "secaudit-storage",
  "serde_yaml",
+]
+
+[[package]]
+name = "secaudit-storage"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

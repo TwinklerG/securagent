@@ -7,13 +7,13 @@ use crate::model::{
     ManagedSession, SessionListItem, SessionManagementInfo, SessionMetadata, SessionStatus,
 };
 use crate::sliding_window::SlidingWindowPolicy;
-use crate::storage::StorageLayout;
+use crate::storage::ConversationLayout;
 
 /// 会话服务配置。
 #[derive(Debug, Clone)]
 pub struct ConversationConfig {
     /// 存储布局。
-    pub storage: StorageLayout,
+    pub storage: ConversationLayout,
     /// 滑动窗口策略。
     pub sliding_window: SlidingWindowPolicy,
 }
@@ -26,7 +26,7 @@ impl ConversationConfig {
     /// 无法推导默认根目录时返回错误。
     pub fn default_storage() -> Result<Self> {
         Ok(Self {
-            storage: StorageLayout::default_root()?,
+            storage: ConversationLayout::default_root()?,
             sliding_window: SlidingWindowPolicy::default(),
         })
     }
@@ -35,7 +35,7 @@ impl ConversationConfig {
     #[must_use]
     pub fn with_root(root: PathBuf) -> Self {
         Self {
-            storage: StorageLayout::new(root),
+            storage: ConversationLayout::new(root),
             sliding_window: SlidingWindowPolicy::default(),
         }
     }

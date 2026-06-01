@@ -2,6 +2,7 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
 use secaudit_agent::{ChatMessage, Role, Session};
+use secaudit_storage::{ACTIVE_DIR, ARCHIVED_DIR};
 use serde::{Deserialize, Serialize};
 
 /// 当前持久化 schema 版本。
@@ -77,8 +78,8 @@ impl SessionStatus {
     #[must_use]
     pub const fn directory(self) -> &'static str {
         match self {
-            Self::Active => "active",
-            Self::Archived => "archived",
+            Self::Active => ACTIVE_DIR,
+            Self::Archived => ARCHIVED_DIR,
         }
     }
 }
@@ -86,8 +87,8 @@ impl SessionStatus {
 impl Display for SessionStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let value = match self {
-            Self::Active => "active",
-            Self::Archived => "archived",
+            Self::Active => ACTIVE_DIR,
+            Self::Archived => ARCHIVED_DIR,
         };
         f.write_str(value)
     }
