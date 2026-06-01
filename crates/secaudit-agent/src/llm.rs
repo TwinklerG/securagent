@@ -15,3 +15,16 @@ pub fn create_client(config: &Config) -> HttpLlmClient {
         model: config.model.clone(),
     })
 }
+
+/// 运行时向服务商查询当前模型的上下文窗口 token 数。
+///
+/// 委托给 [`secaudit_llm::fetch_model_context_window`]；服务商未暴露该字段或
+/// 请求失败时返回 `None`，调用方应回退到配置/默认窗口。
+pub async fn fetch_context_window(config: &Config) -> Option<u64> {
+    secaudit_llm::fetch_model_context_window(&LlmConfig {
+        api_base_url: config.api_base_url.clone(),
+        api_key: config.api_key.clone(),
+        model: config.model.clone(),
+    })
+    .await
+}

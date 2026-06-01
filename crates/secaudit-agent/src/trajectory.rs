@@ -92,16 +92,6 @@ pub struct MultiTurnSample {
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
-fn collect_token_usage(messages: &[ChatMessage]) -> TokenUsage {
-    messages.iter().filter_map(|message| message.usage).fold(
-        TokenUsage::default(),
-        |mut acc, usage| {
-            acc.add_assign(&usage);
-            acc
-        },
-    )
-}
-
 /// 将审计对话历史与发现转换为多轮评估样本。
 #[must_use]
 pub fn to_multi_turn_sample(
@@ -117,7 +107,7 @@ pub fn to_multi_turn_sample(
 
     // reference 字段序列化 findings 供评估指标使用
     let reference = serde_json::to_string(findings).unwrap_or_default();
-    let token_usage = collect_token_usage(messages);
+    let token_usage = TokenUsage::sum_from_messages(messages);
     let metadata = if token_usage.is_zero() {
         None
     } else {

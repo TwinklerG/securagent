@@ -34,8 +34,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use secaudit_agent::Agent;
+use secaudit_agent::TokenUsage;
+use secaudit_agent::llm::fetch_context_window;
 use secaudit_agent::state::AgentState;
-use secaudit_conversation::{SessionListItem, SessionPreviewRole};
+use secaudit_conversation::{ContextUsage, SessionListItem, SessionPreviewRole};
 use secaudit_core::Config;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
@@ -86,27 +88,29 @@ const HELP_TEXT: &[&str] = &[
     "  /sessions      列出当前项目会话",
     "  /session <id|序号>  切换到指定会话",
     "  /status        显示当前状态",
+    "  /usage         显示 Token 用量",
+    "  /context       显示上下文占用",
     "  /tools         列出工具",
     "  /skills        列出可用 Skills",
     "  /exit          退出",
 ];
 
 const HELP_EVENT_SUMMARY: &str = "已显示帮助。";
-const STATUS_EVENT_SUMMARY: &str = "已显示当前状态。";
 const TOOLS_EVENT_SUMMARY: &str = "已显示可用工具。";
 const SKILLS_EVENT_SUMMARY: &str = "已显示可用 Skills。";
 const CLEAR_EVENT_SUMMARY: &str = "已开启新会话，当前视图与事件已清空。";
 const SESSIONS_EVENT_SUMMARY: &str = "已显示会话列表。";
 const SWITCH_SESSION_EVENT_SUMMARY: &str = "已切换会话。";
 const SESSION_PREVIEW_MAX_CHARS: usize = 96;
-
-const COMMAND_CANDIDATES: [&str; 9] = [
+const COMMAND_CANDIDATES: [&str; 11] = [
     "/help",
     "/new",
     "/clear",
     "/sessions",
     "/session ",
     "/status",
+    "/usage",
+    "/context",
     "/tools",
     "/skills",
     "/exit",
@@ -250,6 +254,59 @@ impl EventEntry {
 struct PendingConfirmation {
     prompt: String,
     response_tx: std_mpsc::Sender<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusTab {
+    Settings,
+    Status,
+    Config,
+    Usage,
+    Stats,
+}
+
+impl StatusTab {
+    const ALL: [Self; 5] = [
+        Self::Settings,
+        Self::Status,
+        Self::Config,
+        Self::Usage,
+        Self::Stats,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::Status => "Status",
+            Self::Config => "Config",
+            Self::Usage => "Usage",
+            Self::Stats => "Stats",
+        }
+    }
+
+    fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        let next_idx = (idx + 1) % Self::ALL.len();
+        Self::ALL.get(next_idx).copied().unwrap_or(self)
+    }
+
+    fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        let prev_idx = if idx == 0 {
+            Self::ALL.len().saturating_sub(1)
+        } else {
+            idx - 1
+        };
+        Self::ALL.get(prev_idx).copied().unwrap_or(self)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    None,
+    Status(StatusTab),
+    Usage,
+    Context,
 }
 
 struct TerminalGuard {
@@ -573,12 +630,19 @@ struct TuiApp {
     events: Vec<EventEntry>,
     should_quit: bool,
     busy: bool,
-    show_help: bool,
+    overlay: Overlay,
     tool_names: Vec<String>,
     skill_list: Vec<(String, String)>,
     current_session_id: Option<String>,
     message_count: usize,
     last_state_label: String,
+    model: String,
+    api_base_url: String,
+    max_iterations: u32,
+    reasoning_strategy: String,
+    cumulative_usage: TokenUsage,
+    last_turn_usage: TokenUsage,
+    context_usage: ContextUsage,
     chat_scroll: u16,
     follow_chat: bool,
     chat_viewport_height: u16,
@@ -603,12 +667,19 @@ impl TuiApp {
             events: Vec::new(),
             should_quit: false,
             busy: false,
-            show_help: false,
+            overlay: Overlay::None,
             tool_names: Vec::new(),
             skill_list: Vec::new(),
             current_session_id: None,
             message_count: 0,
             last_state_label: "就绪".to_owned(),
+            model: String::new(),
+            api_base_url: String::new(),
+            max_iterations: 0,
+            reasoning_strategy: String::new(),
+            cumulative_usage: TokenUsage::default(),
+            last_turn_usage: TokenUsage::default(),
+            context_usage: ContextUsage::default(),
             chat_scroll: 0,
             follow_chat: true,
             chat_viewport_height: DEFAULT_VIEWPORT_HEIGHT,
@@ -776,6 +847,9 @@ impl TuiApp {
         self.follow_chat = true;
         self.streaming_index = None;
         self.message_count = 0;
+        self.cumulative_usage = TokenUsage::default();
+        self.last_turn_usage = TokenUsage::default();
+        self.context_usage = ContextUsage::default();
         self.push_system_block(
             &format!("{CLEAR_EVENT_SUMMARY}\n{HELP_HINT}"),
             CLEAR_EVENT_SUMMARY,
@@ -790,6 +864,9 @@ impl TuiApp {
         self.follow_chat = true;
         self.current_session_id = Some(snapshot.id);
         self.message_count = snapshot.message_count;
+        self.cumulative_usage = TokenUsage::default();
+        self.last_turn_usage = TokenUsage::default();
+        self.context_usage = ContextUsage::default();
 
         for message in &snapshot.messages {
             self.push_display_message(message);
@@ -809,21 +886,19 @@ impl TuiApp {
         self.push_system_block(&HELP_TEXT.join("\n"), HELP_EVENT_SUMMARY);
     }
 
-    fn show_status(&mut self) {
-        let activity = if self.busy {
-            "Agent 运行中"
-        } else {
-            "Agent 空闲"
-        };
-        let status = format!(
-            "工作目录：{}\n当前会话：{}\n当前状态：{}\n对话消息数：{}\n{}",
-            self.work_dir.display(),
-            self.current_session_id.as_deref().unwrap_or("尚未就绪"),
-            self.last_state_label,
-            self.message_count,
-            activity
-        );
-        self.push_system_block(&status, STATUS_EVENT_SUMMARY);
+    fn open_status_overlay(&mut self, tab: StatusTab) {
+        self.overlay = Overlay::Status(tab);
+        self.push_event(EventKind::System, "Opened status view".to_owned());
+    }
+
+    fn open_usage_overlay(&mut self) {
+        self.overlay = Overlay::Usage;
+        self.push_event(EventKind::System, "Opened usage view".to_owned());
+    }
+
+    fn open_context_overlay(&mut self) {
+        self.overlay = Overlay::Context;
+        self.push_event(EventKind::System, "Opened context view".to_owned());
     }
 
     fn show_sessions(&mut self, sessions: &[SessionListItem]) {
@@ -959,7 +1034,7 @@ impl TuiApp {
         let root = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
+                Constraint::Length(7),
                 Constraint::Min(4),
                 Constraint::Length(4),
                 Constraint::Length(1),
@@ -1008,6 +1083,18 @@ impl TuiApp {
         .block(Block::default().borders(Borders::ALL).title("Workspace"));
 
         let activity = if self.busy { "Running" } else { "Idle" };
+        let model_display = if self.model.is_empty() {
+            "-".to_owned()
+        } else {
+            self.model.clone()
+        };
+        let tokens_display = format!(
+            "{}",
+            self.cumulative_usage
+                .prompt_tokens
+                .saturating_add(self.cumulative_usage.completion_tokens),
+        );
+        let context_display = format!("{} messages", self.message_count);
         let metrics = Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("Session ", Style::default().fg(Color::Gray)),
@@ -1020,6 +1107,18 @@ impl TuiApp {
             Line::from(vec![
                 Span::styled("State   ", Style::default().fg(Color::Gray)),
                 Span::raw(self.last_state_label.clone()),
+            ]),
+            Line::from(vec![
+                Span::styled("Model   ", Style::default().fg(Color::Gray)),
+                Span::raw(model_display),
+            ]),
+            Line::from(vec![
+                Span::styled("Tokens  ", Style::default().fg(Color::Gray)),
+                Span::raw(tokens_display),
+            ]),
+            Line::from(vec![
+                Span::styled("Context ", Style::default().fg(Color::Gray)),
+                Span::raw(context_display),
             ]),
         ])
         .block(Block::default().borders(Borders::ALL).title("Runtime"));
@@ -1083,15 +1182,16 @@ impl TuiApp {
             .block(Block::default().borders(Borders::ALL).title(input_title))
             .wrap(Wrap { trim: false });
 
-        let footer = Paragraph::new(FOOTER_HINT).style(Style::default().fg(Color::DarkGray));
+        let footer = Paragraph::new(format!("{FOOTER_HINT}  /usage /context"))
+            .style(Style::default().fg(Color::DarkGray));
 
         frame.render_widget(input_panel, *input_area);
         frame.render_widget(footer, *footer_area);
 
         if let Some(pending) = &self.pending_confirmation {
             draw_confirmation_overlay(frame, &pending.prompt);
-        } else if self.show_help {
-            draw_help_overlay(frame);
+        } else if self.overlay != Overlay::None {
+            draw_overlay(frame, self);
         } else {
             let col_u16 = u16::try_from(self.input.cursor_display_col()).unwrap_or(u16::MAX);
             let line_u16 = u16::try_from(self.input.cursor_line).unwrap_or(u16::MAX);
@@ -1199,21 +1299,314 @@ impl TuiApp {
     }
 }
 
-fn draw_help_overlay(frame: &mut Frame<'_>) {
-    let area = centered_rect(70, 70, frame.area());
-    let help_lines: Vec<Line<'_>> = HELP_TEXT.iter().map(|line| Line::raw(*line)).collect();
+fn draw_overlay(frame: &mut Frame<'_>, app: &TuiApp) {
+    match app.overlay {
+        Overlay::None => {}
+        Overlay::Status(tab) => draw_status_overlay(frame, app, tab),
+        Overlay::Usage => draw_usage_overlay(frame, app),
+        Overlay::Context => draw_context_overlay(frame, app),
+    }
+}
 
-    let panel = Paragraph::new(help_lines)
+fn draw_status_overlay(frame: &mut Frame<'_>, app: &TuiApp, active_tab: StatusTab) {
+    let area = centered_rect(78, 74, frame.area());
+    let mut lines = Vec::new();
+
+    lines.push(render_status_tabs(active_tab));
+    lines.push(Line::from(String::new()));
+    lines.extend(match active_tab {
+        StatusTab::Settings => render_settings_lines(app),
+        StatusTab::Status => render_status_lines(app),
+        StatusTab::Config => render_config_lines(app),
+        StatusTab::Usage => render_usage_lines(app),
+        StatusTab::Stats => render_stats_lines(app),
+    });
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(Span::styled(
+        "Esc close | Left/Right switch tabs | /usage and /context open focused views",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let panel = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Help")
+                .title("Status")
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: false });
 
     frame.render_widget(Clear, area);
     frame.render_widget(panel, area);
+}
+
+fn draw_usage_overlay(frame: &mut Frame<'_>, app: &TuiApp) {
+    let area = centered_rect(72, 58, frame.area());
+    let mut lines = vec![Line::from(Span::styled(
+        "Token Usage",
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(String::new()));
+    lines.extend(render_usage_lines(app));
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(Span::styled(
+        "Command: /usage | Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Usage")
+                .border_style(Style::default().fg(Color::LightBlue)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel, area);
+}
+
+fn draw_context_overlay(frame: &mut Frame<'_>, app: &TuiApp) {
+    let area = centered_rect(82, 72, frame.area());
+    let context = &app.context_usage;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Context",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "Estimated current prompt: {} / {} tokens ({}%)",
+            context.used_tokens,
+            context.window_tokens,
+            context.used_percent()
+        )),
+        Line::from(format!("Estimator: {}", context.token_estimator.label())),
+        Line::from(String::new()),
+        render_context_bar(context.used_percent()),
+        Line::from(String::new()),
+    ];
+    lines.extend(render_context_grid(context.used_percent()));
+    lines.push(Line::from(String::new()));
+    lines.extend(render_context_breakdown(context));
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(Span::styled(
+        "Command: /context | Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Context")
+                .border_style(Style::default().fg(Color::LightMagenta)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel, area);
+}
+
+fn render_status_tabs(active_tab: StatusTab) -> Line<'static> {
+    let mut spans = Vec::new();
+    for tab in StatusTab::ALL {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+
+        let label = format!(" {} ", tab.label());
+        let style = if tab == active_tab {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans)
+}
+
+fn render_settings_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    vec![
+        kv_line("Working dir", app.work_dir.display().to_string()),
+        kv_line(
+            "Session",
+            app.current_session_id.as_deref().unwrap_or("pending"),
+        ),
+        kv_line("Model", display_or_dash(&app.model)),
+        kv_line("Strategy", display_or_dash(&app.reasoning_strategy)),
+        kv_line("Max iterations", display_u32(app.max_iterations)),
+    ]
+}
+
+fn render_status_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    vec![
+        kv_line("Agent", if app.busy { "Running" } else { "Idle" }),
+        kv_line("State", &app.last_state_label),
+        kv_line("Messages", app.message_count.to_string()),
+        kv_line("Tools", app.tool_names.len().to_string()),
+        kv_line(
+            "Event panel",
+            if app.event_panel_collapsed {
+                "Collapsed"
+            } else {
+                "Expanded"
+            },
+        ),
+    ]
+}
+
+fn render_config_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    vec![
+        kv_line("API base URL", display_or_dash(&app.api_base_url)),
+        kv_line("Model", display_or_dash(&app.model)),
+        kv_line("Strategy", display_or_dash(&app.reasoning_strategy)),
+        kv_line("Max iterations", display_u32(app.max_iterations)),
+    ]
+}
+
+fn render_usage_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let cumulative_total = usage_total(app.cumulative_usage);
+    let last_total = usage_total(app.last_turn_usage);
+    vec![
+        kv_line("Total tokens", cumulative_total.to_string()),
+        kv_line(
+            "Prompt tokens",
+            app.cumulative_usage.prompt_tokens.to_string(),
+        ),
+        kv_line(
+            "Completion tokens",
+            app.cumulative_usage.completion_tokens.to_string(),
+        ),
+        kv_line("Last turn total", last_total.to_string()),
+        kv_line(
+            "Last turn prompt",
+            app.last_turn_usage.prompt_tokens.to_string(),
+        ),
+        kv_line(
+            "Last turn completion",
+            app.last_turn_usage.completion_tokens.to_string(),
+        ),
+    ]
+}
+
+fn render_stats_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    let context = &app.context_usage;
+    vec![
+        kv_line("Messages", app.message_count.to_string()),
+        kv_line("Events", app.events.len().to_string()),
+        kv_line("Tools", app.tool_names.len().to_string()),
+        kv_line("Context used", format!("{}%", context.used_percent())),
+        kv_line(
+            "Cumulative tokens",
+            usage_total(app.cumulative_usage).to_string(),
+        ),
+    ]
+}
+
+fn kv_line(label: &str, value: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<18}"), Style::default().fg(Color::Gray)),
+        Span::raw(value.into()),
+    ])
+}
+
+fn display_or_dash(value: &str) -> String {
+    if value.is_empty() {
+        "-".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn display_u32(value: u32) -> String {
+    if value == 0 {
+        "-".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+fn usage_total(usage: TokenUsage) -> u64 {
+    if usage.total_tokens > 0 {
+        usage.total_tokens
+    } else {
+        usage.prompt_tokens.saturating_add(usage.completion_tokens)
+    }
+}
+
+fn render_context_bar(used_percent: u64) -> Line<'static> {
+    const WIDTH: usize = 48;
+    let filled = usize::try_from(used_percent)
+        .unwrap_or(0)
+        .saturating_mul(WIDTH)
+        / 100;
+    let mut spans = Vec::with_capacity(WIDTH);
+    for idx in 0..WIDTH {
+        let style = if idx < filled {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled("█", style));
+    }
+    Line::from(spans)
+}
+
+fn render_context_grid(used_percent: u64) -> Vec<Line<'static>> {
+    const COLS: usize = 25;
+    const ROWS: usize = 4;
+    let used_cells = usize::try_from(used_percent)
+        .unwrap_or(0)
+        .min(100)
+        .saturating_mul(COLS * ROWS)
+        / 100;
+    let mut lines = Vec::with_capacity(ROWS);
+
+    for row in 0..ROWS {
+        let mut spans = Vec::with_capacity(COLS * 2);
+        for col in 0..COLS {
+            let idx = row * COLS + col;
+            let style = if idx < used_cells {
+                Style::default().fg(Color::LightGreen)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled("■", style));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn render_context_breakdown(context: &ContextUsage) -> Vec<Line<'static>> {
+    vec![
+        context_part_line(
+            "System prompt",
+            context.system_tokens,
+            context.window_tokens,
+        ),
+        context_part_line("Tools", context.tool_tokens, context.window_tokens),
+        context_part_line("Messages", context.message_tokens, context.window_tokens),
+        context_part_line("Free space", context.free_tokens, context.window_tokens),
+    ]
+}
+
+fn context_part_line(label: &str, tokens: u64, total_tokens: u64) -> Line<'static> {
+    let tenths = percent_tenths(tokens, total_tokens);
+    kv_line(
+        label,
+        format!("{}.{:01}%  {} tokens", tenths / 10, tenths % 10, tokens),
+    )
+}
+
+fn percent_tenths(value: u64, total: u64) -> u64 {
+    value.saturating_mul(1_000).checked_div(total).unwrap_or(0)
 }
 
 fn draw_confirmation_overlay(frame: &mut Frame<'_>, prompt: &str) {
@@ -1429,13 +1822,24 @@ async fn run_worker(
     mut command_rx: mpsc::UnboundedReceiver<WorkerCommand>,
     event_tx: mpsc::UnboundedSender<WorkerEvent>,
 ) {
+    let model = config.model.clone();
+    let api_base_url = config.api_base_url.clone();
+    let max_iterations = config.max_iterations;
+    let reasoning_strategy = config.reasoning_strategy.clone();
+    let context_window_tokens = if config.has_context_window_override() {
+        config.context_window_tokens
+    } else {
+        fetch_context_window(&config)
+            .await
+            .unwrap_or(config.context_window_tokens)
+    };
     let mut agent = Agent::new(config, work_dir.clone(), cli_confirm(event_tx.clone()));
     bind_agent_callbacks(&mut agent, &event_tx);
 
     let tool_names = agent.tool_names();
     let skill_list = agent.skill_list();
 
-    let conversation = match build_worker_conversation() {
+    let conversation = match build_worker_conversation(context_window_tokens, &model) {
         Ok(service) => service,
         Err(error) => {
             let _ = event_tx.send(WorkerEvent::Error(format!("会话服务初始化失败：{error}")));
@@ -1454,19 +1858,40 @@ async fn run_worker(
         tool_names,
         skill_list,
         session: SessionSnapshot::from_managed(&session),
+        model,
+        api_base_url,
+        max_iterations,
+        reasoning_strategy,
+        context_usage: conversation.active_context_usage(&session),
     });
 
     while let Some(command) = command_rx.recv().await {
         match command {
             WorkerCommand::Chat(request) => {
+                let previous_usage = TokenUsage::sum_from_messages(session.session().messages());
                 let response = conversation
                     .chat(&mut agent, &mut session, &request.input)
                     .await
                     .map_err(|e| format!("{e}"));
 
+                let usage = TokenUsage::sum_from_messages(session.session().messages());
+                let last_turn_usage = TokenUsage {
+                    prompt_tokens: usage
+                        .prompt_tokens
+                        .saturating_sub(previous_usage.prompt_tokens),
+                    completion_tokens: usage
+                        .completion_tokens
+                        .saturating_sub(previous_usage.completion_tokens),
+                    total_tokens: usage
+                        .total_tokens
+                        .saturating_sub(previous_usage.total_tokens),
+                };
                 let _ = event_tx.send(WorkerEvent::ChatDone {
                     response,
                     message_count: session.session().messages().len(),
+                    usage,
+                    last_turn_usage,
+                    context_usage: conversation.active_context_usage(&session),
                 });
             }
             WorkerCommand::NewSession => {
@@ -1475,6 +1900,7 @@ async fn run_worker(
                         session = new_session;
                         let _ = event_tx.send(WorkerEvent::NewSession {
                             session: SessionSnapshot::from_managed(&session),
+                            context_usage: conversation.active_context_usage(&session),
                         });
                     }
                     Err(error) => {
@@ -1497,6 +1923,10 @@ async fn run_worker(
                                 session = loaded_session;
                                 let _ = event_tx.send(WorkerEvent::SessionLoaded {
                                     session: SessionSnapshot::from_managed(&session),
+                                    usage: TokenUsage::sum_from_messages(
+                                        session.session().messages(),
+                                    ),
+                                    context_usage: conversation.active_context_usage(&session),
                                 });
                             }
                             Err(error) => {
@@ -1513,6 +1943,8 @@ async fn run_worker(
             WorkerCommand::QueryStatus => {
                 let _ = event_tx.send(WorkerEvent::Status {
                     message_count: session.session().messages().len(),
+                    usage: TokenUsage::sum_from_messages(session.session().messages()),
+                    context_usage: conversation.active_context_usage(&session),
                 });
             }
             WorkerCommand::Shutdown => {
@@ -1533,11 +1965,21 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                 tool_names,
                 skill_list,
                 session,
+                model,
+                api_base_url,
+                max_iterations,
+                reasoning_strategy,
+                context_usage,
             } => {
                 app.tool_names = tool_names;
                 app.skill_list = skill_list;
                 app.current_session_id = Some(session.id);
                 app.message_count = session.message_count;
+                app.model = model;
+                app.api_base_url = api_base_url;
+                app.max_iterations = max_iterations;
+                app.reasoning_strategy = reasoning_strategy;
+                app.context_usage = context_usage;
                 app.push_system("Agent 已就绪。");
             }
             WorkerEvent::State(state) => app.push_state(&state),
@@ -1548,9 +1990,15 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             WorkerEvent::ChatDone {
                 response,
                 message_count,
+                usage,
+                last_turn_usage,
+                context_usage,
             } => {
                 app.busy = false;
                 app.message_count = message_count;
+                app.last_turn_usage = last_turn_usage;
+                app.cumulative_usage = usage;
+                app.context_usage = context_usage;
                 match response {
                     Ok(text) => app.finalize_streaming(&text),
                     Err(err) => {
@@ -1559,17 +2007,34 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                     }
                 }
             }
-            WorkerEvent::Status { message_count } => {
+            WorkerEvent::Status {
+                message_count,
+                usage,
+                context_usage,
+            } => {
                 app.message_count = message_count;
+                app.cumulative_usage = usage;
+                app.context_usage = context_usage;
             }
-            WorkerEvent::NewSession { session } => {
+            WorkerEvent::NewSession {
+                session,
+                context_usage,
+            } => {
                 app.clear_messages_and_events();
                 app.current_session_id = Some(session.id);
                 app.message_count = session.message_count;
+                app.context_usage = context_usage;
             }
-            WorkerEvent::SessionLoaded { session } => {
+            WorkerEvent::SessionLoaded {
+                session,
+                usage,
+                context_usage,
+            } => {
                 let session_id = session.id.clone();
                 app.load_session_snapshot(session, &format!("已切换到会话：{session_id}"));
+                app.cumulative_usage = usage;
+                app.last_turn_usage = TokenUsage::default();
+                app.context_usage = context_usage;
             }
             WorkerEvent::SessionList { sessions } => match sessions {
                 Ok(sessions) => app.show_sessions(&sessions),
@@ -1611,9 +2076,21 @@ fn process_terminal_key(
         return;
     }
 
-    if app.show_help {
-        if matches!(key.code, KeyCode::Esc | KeyCode::F(1)) {
-            app.show_help = false;
+    if app.overlay != Overlay::None {
+        match key.code {
+            KeyCode::Esc => app.overlay = Overlay::None,
+            KeyCode::F(1) => app.show_help_text(),
+            KeyCode::Left => {
+                if let Overlay::Status(tab) = app.overlay {
+                    app.overlay = Overlay::Status(tab.prev());
+                }
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                if let Overlay::Status(tab) = app.overlay {
+                    app.overlay = Overlay::Status(tab.next());
+                }
+            }
+            _ => {}
         }
         return;
     }
@@ -1645,9 +2122,7 @@ fn process_terminal_key(
     }
 
     match key.code {
-        KeyCode::F(1) => {
-            app.show_help = true;
-        }
+        KeyCode::F(1) => app.show_help_text(),
         KeyCode::Up => {
             if app.input.is_empty() {
                 app.scroll_chat_up(1);
@@ -1839,8 +2314,10 @@ fn handle_command(
             if command_tx.send(WorkerCommand::QueryStatus).is_err() {
                 app.push_error("无法查询 Agent 状态。");
             }
-            app.show_status();
+            app.open_status_overlay(StatusTab::Status);
         }
+        Command::Usage => app.open_usage_overlay(),
+        Command::Context => app.open_context_overlay(),
         Command::Tools => app.show_tools(),
         Command::Skills => app.show_skills(),
         Command::Exit => app.should_quit = true,

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use secaudit_agent::{Agent, ChatMessage, Session};
 
+use crate::context_usage::{ContextUsage, ContextUsageEstimator};
 use crate::error::Result;
 use crate::model::{
     ManagedSession, SessionListItem, SessionManagementInfo, SessionMetadata, SessionStatus,
@@ -16,6 +17,8 @@ pub struct ConversationConfig {
     pub storage: ConversationLayout,
     /// 滑动窗口策略。
     pub sliding_window: SlidingWindowPolicy,
+    /// Token/context usage estimator shared by UI and future compression.
+    pub context_usage: ContextUsageEstimator,
 }
 
 impl ConversationConfig {
@@ -28,6 +31,7 @@ impl ConversationConfig {
         Ok(Self {
             storage: ConversationLayout::default_root()?,
             sliding_window: SlidingWindowPolicy::default(),
+            context_usage: ContextUsageEstimator::default(),
         })
     }
 
@@ -37,7 +41,22 @@ impl ConversationConfig {
         Self {
             storage: ConversationLayout::new(root),
             sliding_window: SlidingWindowPolicy::default(),
+            context_usage: ContextUsageEstimator::default(),
         }
+    }
+
+    /// Use an explicit context window from model/config metadata.
+    #[must_use]
+    pub fn with_context_window(mut self, window_tokens: u64) -> Self {
+        self.context_usage = ContextUsageEstimator::new(window_tokens);
+        self
+    }
+
+    /// Use explicit model metadata for context token estimation.
+    #[must_use]
+    pub fn with_context_model<S: Into<String>>(mut self, window_tokens: u64, model: S) -> Self {
+        self.context_usage = ContextUsageEstimator::with_model(window_tokens, model);
+        self
     }
 }
 
@@ -162,6 +181,24 @@ impl ConversationService {
                 .to_string(),
             storage_root: self.config.storage.root().display().to_string(),
         }
+    }
+
+    /// Estimate token-level context usage for the full session history.
+    #[must_use]
+    pub fn context_usage(&self, managed: &ManagedSession) -> ContextUsage {
+        self.config
+            .context_usage
+            .estimate(managed.session().messages())
+    }
+
+    /// Estimate token-level context usage for the messages selected for the next LLM call.
+    #[must_use]
+    pub fn active_context_usage(&self, managed: &ManagedSession) -> ContextUsage {
+        let context_messages = self
+            .config
+            .sliding_window
+            .apply(managed.session().messages());
+        self.config.context_usage.estimate(&context_messages)
     }
 }
 

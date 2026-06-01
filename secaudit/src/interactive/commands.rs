@@ -19,6 +19,8 @@ pub enum Command {
     ListSessions,
     SwitchSession { selector: String },
     Status,
+    Usage,
+    Context,
     Tools,
     Skills,
     Exit,
@@ -37,6 +39,8 @@ pub fn parse(input: &str) -> UserInput {
         "/clear" | "/new" => Some(Command::NewSession),
         "/sessions" => Some(Command::ListSessions),
         "/status" => Some(Command::Status),
+        "/usage" => Some(Command::Usage),
+        "/context" => Some(Command::Context),
         "/tools" => Some(Command::Tools),
         "/skills" => Some(Command::Skills),
         "/exit" => Some(Command::Exit),
@@ -116,5 +120,12 @@ mod tests {
             parse("分析 src/main.rs 的安全风险"),
             UserInput::Chat("分析 src/main.rs 的安全风险".to_owned())
         );
+    }
+
+    #[test]
+    fn parse_status_family_commands() {
+        assert_eq!(parse("/status"), UserInput::Command(Command::Status));
+        assert_eq!(parse("/usage"), UserInput::Command(Command::Usage));
+        assert_eq!(parse("/context"), UserInput::Command(Command::Context));
     }
 }

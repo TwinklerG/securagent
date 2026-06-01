@@ -12,23 +12,21 @@ const ENV_MODEL: &str = "SECAUDIT_MODEL";
 const ENV_MAX_ITERATIONS: &str = "SECAUDIT_MAX_ITERATIONS";
 const ENV_STRATEGY: &str = "SECAUDIT_STRATEGY";
 const ENV_ENABLE_SKILLS: &str = "SECAUDIT_ENABLE_SKILLS";
-
+const ENV_CONTEXT_WINDOW_TOKENS: &str = "SECAUDIT_CONTEXT_WINDOW_TOKENS";
 const CONFIG_FILE: &str = "config.json";
 
 /// 默认 API 基础 URL
 const DEFAULT_API_BASE_URL: &str = "https://api.openai.com/v1";
-
 /// 默认模型名称
 const DEFAULT_MODEL: &str = "gpt-4o";
-
 /// 默认最大 `ReAct` 循环轮次
 const DEFAULT_MAX_ITERATIONS: u32 = 40;
-
 /// 默认推理策略
 const DEFAULT_STRATEGY: &str = "react";
-
 /// 默认启用 Skills
 const DEFAULT_ENABLE_SKILLS: bool = true;
+/// 默认上下文窗口大小
+const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 
 /// 应用配置，支持环境变量（`SECAUDIT_` 前缀）和配置文件两种来源。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -45,6 +43,10 @@ pub struct Config {
     pub reasoning_strategy: String,
     /// 是否启用 Skills 系统
     pub enable_skills: bool,
+    /// 当前模型的上下文窗口 token 数
+    pub context_window_tokens: u64,
+    #[serde(default)]
+    pub context_window_tokens_overridden: bool,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -56,6 +58,7 @@ struct FileConfig {
     max_iterations: Option<u32>,
     reasoning_strategy: Option<String>,
     enable_skills: Option<bool>,
+    context_window_tokens: Option<u64>,
 }
 
 impl Default for Config {
@@ -67,6 +70,8 @@ impl Default for Config {
             max_iterations: DEFAULT_MAX_ITERATIONS,
             reasoning_strategy: DEFAULT_STRATEGY.into(),
             enable_skills: DEFAULT_ENABLE_SKILLS,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            context_window_tokens_overridden: false,
         }
     }
 }
@@ -112,6 +117,11 @@ impl Config {
         dirs::home_dir().map(|home_dir| home_dir.join(RUNTIME_DIR).join(CONFIG_FILE))
     }
 
+    #[must_use]
+    pub const fn has_context_window_override(&self) -> bool {
+        self.context_window_tokens_overridden
+    }
+
     fn load_with_sources<F>(path: Option<&Path>, read_env: F) -> Result<Self, Error>
     where
         F: FnMut(&str) -> Option<String>,
@@ -145,6 +155,15 @@ impl Config {
         let enable_skills = read_env(ENV_ENABLE_SKILLS)
             .map(|value| parse_bool(ENV_ENABLE_SKILLS, &value))
             .transpose()?;
+        let context_window_tokens = read_env(ENV_CONTEXT_WINDOW_TOKENS)
+            .map(|value| {
+                value.trim().parse::<u64>().map_err(|error| {
+                    Error::Config(format!(
+                        "{ENV_CONTEXT_WINDOW_TOKENS} 必须是正整数，当前值为 {value:?}：{error}"
+                    ))
+                })
+            })
+            .transpose()?;
         self.apply_patch(FileConfig {
             api_base_url: read_env(ENV_API_BASE_URL),
             api_key: read_env(ENV_API_KEY),
@@ -152,6 +171,7 @@ impl Config {
             max_iterations,
             reasoning_strategy: read_env(ENV_STRATEGY),
             enable_skills,
+            context_window_tokens,
         })
     }
 
@@ -177,6 +197,15 @@ impl Config {
         if let Some(value) = patch.enable_skills {
             self.enable_skills = value;
         }
+        if let Some(value) = patch.context_window_tokens {
+            if value == 0 {
+                return Err(Error::Config(
+                    "配置项 context_window_tokens 必须大于 0".to_owned(),
+                ));
+            }
+            self.context_window_tokens = value;
+            self.context_window_tokens_overridden = true;
+        }
         Ok(())
     }
 
@@ -187,6 +216,11 @@ impl Config {
         self.reasoning_strategy = require_non_empty("reasoning_strategy", self.reasoning_strategy)?;
         if self.max_iterations == 0 {
             return Err(Error::Config("配置项 max_iterations 必须大于 0".to_owned()));
+        }
+        if self.context_window_tokens == 0 {
+            return Err(Error::Config(
+                "配置项 context_window_tokens 必须大于 0".to_owned(),
+            ));
         }
         Ok(self)
     }
@@ -248,9 +282,10 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::config::CONFIG_FILE;
-
-    use super::{Config, ENV_API_BASE_URL, ENV_API_KEY, ENV_ENABLE_SKILLS, ENV_MODEL};
+    use super::{
+        CONFIG_FILE, Config, ENV_API_BASE_URL, ENV_API_KEY, ENV_CONTEXT_WINDOW_TOKENS,
+        ENV_ENABLE_SKILLS, ENV_MODEL,
+    };
 
     #[test]
     fn from_file_loads_partial_json_with_defaults() {
@@ -272,6 +307,8 @@ mod tests {
         assert_eq!(config.api_base_url, "https://api.openai.com/v1");
         assert_eq!(config.max_iterations, 40);
         assert!(config.enable_skills);
+        assert_eq!(config.context_window_tokens, 128_000);
+        assert!(!config.has_context_window_override());
     }
 
     #[test]
@@ -293,6 +330,7 @@ mod tests {
             ENV_API_BASE_URL => Some("https://env.example/v1".to_owned()),
             ENV_MODEL => Some("env-model".to_owned()),
             ENV_ENABLE_SKILLS => Some("false".to_owned()),
+            ENV_CONTEXT_WINDOW_TOKENS => Some("64".to_owned()),
             _ => None,
         })
         .expect("load config");
@@ -301,6 +339,8 @@ mod tests {
         assert_eq!(config.api_base_url, "https://env.example/v1");
         assert_eq!(config.model, "env-model");
         assert!(!config.enable_skills);
+        assert_eq!(config.context_window_tokens, 64);
+        assert!(config.has_context_window_override());
     }
 
     #[test]

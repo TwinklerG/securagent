@@ -13,6 +13,8 @@ secaudit-storage = { path = "../secaudit-storage" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tiktoken = "3"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

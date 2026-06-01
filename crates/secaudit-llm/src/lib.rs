@@ -17,6 +17,7 @@ use async_openai::types::chat::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// secaudit-llm 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +38,178 @@ pub struct LlmConfig {
     pub api_key: String,
     /// 模型名称
     pub model: String,
+}
+
+/// 拉取模型元数据的请求超时。
+const MODEL_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+
+/// 不同 `OpenAI` 兼容服务商暴露上下文窗口所用的字段名（按优先级）。
+const CONTEXT_WINDOW_FIELDS: [&str; 6] = [
+    "context_length",
+    "context_window",
+    "max_context_length",
+    "max_context_window_tokens",
+    "max_input_tokens",
+    "max_tokens",
+];
+
+/// 运行时查询当前模型的上下文窗口 token 数。
+pub async fn fetch_model_context_window(config: &LlmConfig) -> Option<u64> {
+    let client = reqwest::Client::builder()
+        .timeout(MODEL_METADATA_TIMEOUT)
+        .user_agent("Go-http-client/1.1")
+        .build()
+        .ok()?;
+
+    let value = fetch_model_metadata(&client, OPENROUTER_MODELS_URL).await?;
+    extract_context_window(&value, &config.model)
+}
+
+async fn fetch_model_metadata(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+    let response = client.get(url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().await.ok()
+}
+
+/// 从 `/models` 响应中解析指定模型的上下文窗口。纯函数，便于单测。
+fn extract_context_window(value: &serde_json::Value, model: &str) -> Option<u64> {
+    // 列表结构：优先取 id == model 的条目；只有一条时直接采用。
+    if let Some(items) = value.get("data").and_then(serde_json::Value::as_array) {
+        let entry = find_model_entry(items, model).or_else(|| {
+            if items.len() == 1 {
+                items.first()
+            } else {
+                None
+            }
+        })?;
+        return window_from_object(entry);
+    }
+    // 单对象结构（/models/{id}）。
+    window_from_object(value)
+}
+
+fn find_model_entry<'a>(
+    items: &'a [serde_json::Value],
+    model: &str,
+) -> Option<&'a serde_json::Value> {
+    items.iter().find(|item| model_entry_matches(item, model))
+}
+
+fn model_entry_matches(item: &serde_json::Value, model: &str) -> bool {
+    ["id", "canonical_slug"].iter().any(|field| {
+        item.get(*field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|candidate| model_name_matches(candidate, model))
+    })
+}
+
+fn model_name_matches(candidate: &str, model: &str) -> bool {
+    let candidate = candidate.trim();
+    let model = model.trim();
+    if candidate.eq_ignore_ascii_case(model) {
+        return true;
+    }
+    let candidate_slug = candidate.rsplit('/').next().unwrap_or(candidate);
+    let model_slug = model.rsplit('/').next().unwrap_or(model);
+    candidate_slug.eq_ignore_ascii_case(model_slug)
+}
+
+/// 从单个模型对象里取窗口大小。OpenRouter 等会嵌套在 `top_provider.context_length`。
+fn window_from_object(object: &serde_json::Value) -> Option<u64> {
+    let nested = object
+        .get("top_provider")
+        .and_then(|provider| provider.get("context_length"))
+        .and_then(value_as_u64);
+    if nested.is_some() {
+        return nested;
+    }
+    CONTEXT_WINDOW_FIELDS
+        .iter()
+        .find_map(|field| object.get(*field).and_then(value_as_u64))
+}
+
+/// 字段可能是数字或数字字符串，统一解析为正的 `u64`。
+fn value_as_u64(value: &serde_json::Value) -> Option<u64> {
+    if let Some(number) = value.as_u64() {
+        return (number > 0).then_some(number);
+    }
+    value
+        .as_str()
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|number| *number > 0)
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::extract_context_window;
+
+    #[test]
+    fn prefers_nested_top_provider_window() {
+        let body = serde_json::json!({
+            "data": [
+                {"id": "other", "context_length": 8_000},
+                {"id": "target", "context_length": 64_000,
+                 "top_provider": {"context_length": 128_000}}
+            ]
+        });
+        assert_eq!(extract_context_window(&body, "target"), Some(128_000));
+    }
+
+    #[test]
+    fn parses_flat_context_length_field() {
+        let body = serde_json::json!({"data": [{"id": "m", "context_length": 45_000}]});
+        assert_eq!(extract_context_window(&body, "m"), Some(45_000));
+    }
+
+    #[test]
+    fn parses_single_object_endpoint() {
+        let body = serde_json::json!({"id": "m", "max_input_tokens": "200000"});
+        assert_eq!(extract_context_window(&body, "m"), Some(200_000));
+    }
+
+    #[test]
+    fn matches_openrouter_slug_suffix() {
+        let body = serde_json::json!({
+            "data": [{
+                "id": "deepseek/deepseek-v3.2",
+                "canonical_slug": "deepseek/deepseek-v3.2",
+                "context_length": 1_000_000
+            }]
+        });
+
+        assert_eq!(
+            extract_context_window(&body, "deepseek-v3.2"),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn matches_openrouter_slug_when_provider_prefix_differs() {
+        let body = serde_json::json!({
+            "data": [{
+                "id": "moonshotai/kimi-k2.6",
+                "canonical_slug": "moonshotai/kimi-k2.6",
+                "context_length": 262_000
+            }]
+        });
+
+        assert_eq!(
+            extract_context_window(&body, "kimi/kimi-k2.6"),
+            Some(262_000)
+        );
+    }
+
+    #[test]
+    fn returns_none_when_provider_omits_window() {
+        // DeepSeek / OpenAI 形态：只有 id/object/owned_by。
+        let body = serde_json::json!({
+            "data": [{"id": "deepseek-chat", "object": "model", "owned_by": "deepseek"}]
+        });
+        assert_eq!(extract_context_window(&body, "deepseek-chat"), None);
+    }
 }
 
 /// Token 用量统计。
@@ -62,6 +235,18 @@ impl TokenUsage {
     #[must_use]
     pub const fn is_zero(self) -> bool {
         self.prompt_tokens == 0 && self.completion_tokens == 0 && self.total_tokens == 0
+    }
+
+    /// 累加切片中所有消息的 token 用量。通常只有 assistant 消息携带 `usage`。
+    #[must_use]
+    pub fn sum_from_messages(messages: &[ChatMessage]) -> Self {
+        messages.iter().filter_map(|message| message.usage).fold(
+            Self::default(),
+            |mut acc, usage| {
+                acc.add_assign(&usage);
+                acc
+            },
+        )
     }
 }
 

@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 
 use secaudit_agent::state::AgentState;
-use secaudit_agent::{ChatMessage as AgentChatMessage, Role};
-use secaudit_conversation::{ConversationService, ManagedSession, SessionListItem};
+use secaudit_agent::{ChatMessage as AgentChatMessage, Role, TokenUsage};
+use secaudit_conversation::{
+    ContextUsage, ConversationConfig, ConversationService, ManagedSession, SessionListItem,
+};
 use secaudit_core::Config;
 
 #[derive(Debug, Clone)]
@@ -73,6 +75,11 @@ enum WorkerEvent {
         /// `(name, description)` 列表，来自 `SkillRegistry`
         skill_list: Vec<(String, String)>,
         session: SessionSnapshot,
+        model: String,
+        api_base_url: String,
+        max_iterations: u32,
+        reasoning_strategy: String,
+        context_usage: ContextUsage,
     },
     State(AgentState),
     Think(String),
@@ -88,15 +95,23 @@ enum WorkerEvent {
     ChatDone {
         response: Result<String, String>,
         message_count: usize,
+        usage: TokenUsage,
+        last_turn_usage: TokenUsage,
+        context_usage: ContextUsage,
     },
     Status {
         message_count: usize,
+        usage: TokenUsage,
+        context_usage: ContextUsage,
     },
     NewSession {
         session: SessionSnapshot,
+        context_usage: ContextUsage,
     },
     SessionLoaded {
         session: SessionSnapshot,
+        usage: TokenUsage,
+        context_usage: ContextUsage,
     },
     SessionList {
         sessions: Result<Vec<SessionListItem>, String>,
@@ -118,8 +133,13 @@ enum WorkerCommand {
     Shutdown,
 }
 
-fn build_worker_conversation() -> secaudit_conversation::Result<ConversationService> {
-    ConversationService::with_default_storage()
+fn build_worker_conversation(
+    context_window_tokens: u64,
+    model: &str,
+) -> secaudit_conversation::Result<ConversationService> {
+    let config =
+        ConversationConfig::default_storage()?.with_context_model(context_window_tokens, model);
+    Ok(ConversationService::new(config))
 }
 
 fn start_worker_session(

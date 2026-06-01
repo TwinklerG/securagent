@@ -34,6 +34,7 @@ cp .env.example .env
 export SECAUDIT_API_KEY="your-api-key"
 export SECAUDIT_API_BASE_URL="https://api.openai.com/v1"  # 可选，默认 OpenAI
 export SECAUDIT_MODEL="gpt-4o"                             # 可选
+export SECAUDIT_CONTEXT_WINDOW_TOKENS="128000"             # 可选，模型上下文窗口
 export SECAUDIT_STRATEGY="react"                            # react / reflexion
 export SECAUDIT_MAX_ITERATIONS="40"                         # 可选，默认 40
 ```
