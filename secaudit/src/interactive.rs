@@ -84,6 +84,7 @@ enum WorkerEvent {
     State(AgentState),
     Think(String),
     Delta(String),
+    Usage(TokenUsage),
     ToolCall {
         name: String,
         args: String,

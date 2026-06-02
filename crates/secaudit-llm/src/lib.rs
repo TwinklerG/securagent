@@ -392,22 +392,31 @@ struct StreamAggregator {
     usage: Option<TokenUsage>,
 }
 
+struct StreamUpdate {
+    delta: Option<String>,
+    usage: Option<TokenUsage>,
+}
+
 impl StreamAggregator {
     fn new() -> Self {
         Self::default()
     }
 
-    /// 消费一个 chunk。若 chunk 带新增文本，则返回该增量供调用方触发流式回调。
-    fn ingest(&mut self, chunk: CreateChatCompletionStreamResponse) -> Option<String> {
-        if let Some(chunk_usage) = chunk.usage.as_ref() {
-            self.usage = Some(TokenUsage {
+    /// 消费一个 chunk，返回文本增量和真实 usage（若服务商在本 chunk 提供）。
+    fn ingest(&mut self, chunk: CreateChatCompletionStreamResponse) -> StreamUpdate {
+        let usage = chunk.usage.as_ref().map(|chunk_usage| {
+            let usage = TokenUsage {
                 prompt_tokens: chunk_usage.prompt_tokens.into(),
                 completion_tokens: chunk_usage.completion_tokens.into(),
                 total_tokens: chunk_usage.total_tokens.into(),
-            });
-        }
+            };
+            self.usage = Some(usage);
+            usage
+        });
 
-        let choice = chunk.choices.into_iter().next()?;
+        let Some(choice) = chunk.choices.into_iter().next() else {
+            return StreamUpdate { delta: None, usage };
+        };
         let delta = choice.delta;
 
         if let Some(tc_chunks) = delta.tool_calls {
@@ -431,10 +440,13 @@ impl StreamAggregator {
             && !text.is_empty()
         {
             self.content.push_str(&text);
-            return Some(text);
+            return StreamUpdate {
+                delta: Some(text),
+                usage,
+            };
         }
 
-        None
+        StreamUpdate { delta: None, usage }
     }
 
     /// 流结束后产出装配好的 assistant `ChatMessage`。
@@ -682,14 +694,16 @@ impl HttpLlmClient {
     /// # Errors
     ///
     /// 请求构建、API 调用或响应解析失败时返回 [`Error::Llm`]。
-    pub async fn chat_stream<F>(
+    pub async fn chat_stream<F, U>(
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
         mut on_delta: F,
+        mut on_usage: U,
     ) -> Result<ChatMessage, Error>
     where
         F: FnMut(&str) + Send,
+        U: FnMut(TokenUsage) + Send,
     {
         let request_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
@@ -733,7 +747,11 @@ impl HttpLlmClient {
         let mut aggregator = StreamAggregator::new();
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| Error::Llm(format!("流式响应读取失败：{e}")))?;
-            if let Some(delta) = aggregator.ingest(chunk) {
+            let update = aggregator.ingest(chunk);
+            if let Some(usage) = update.usage {
+                on_usage(usage);
+            }
+            if let Some(delta) = update.delta {
                 on_delta(&delta);
             }
         }

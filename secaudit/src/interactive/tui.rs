@@ -51,7 +51,9 @@ use event_format::{summarize_tool_args, summarize_tool_result};
 use markdown::render_markdown_lines;
 use timestamp::{format_absolute_timestamp, now_timestamp};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const POLL_INTERVAL: Duration = Duration::from_millis(16);
+const PENDING_USAGE_STEP: u64 = 16;
+const PENDING_USAGE_LIMIT: u64 = 1_200;
 const MAX_EVENT_LINES: usize = 500;
 const MAX_WORKER_EVENTS_PER_TICK: usize = 128;
 const MAX_TERMINAL_EVENTS_PER_TICK: usize = 64;
@@ -642,6 +644,10 @@ struct TuiApp {
     reasoning_strategy: String,
     cumulative_usage: TokenUsage,
     last_turn_usage: TokenUsage,
+    displayed_cumulative_usage: TokenUsage,
+    displayed_last_turn_usage: TokenUsage,
+    usage_animation_base: TokenUsage,
+    turn_usage_resolved: bool,
     context_usage: ContextUsage,
     chat_scroll: u16,
     follow_chat: bool,
@@ -679,6 +685,10 @@ impl TuiApp {
             reasoning_strategy: String::new(),
             cumulative_usage: TokenUsage::default(),
             last_turn_usage: TokenUsage::default(),
+            displayed_cumulative_usage: TokenUsage::default(),
+            displayed_last_turn_usage: TokenUsage::default(),
+            usage_animation_base: TokenUsage::default(),
+            turn_usage_resolved: true,
             context_usage: ContextUsage::default(),
             chat_scroll: 0,
             follow_chat: true,
@@ -849,6 +859,10 @@ impl TuiApp {
         self.message_count = 0;
         self.cumulative_usage = TokenUsage::default();
         self.last_turn_usage = TokenUsage::default();
+        self.displayed_cumulative_usage = TokenUsage::default();
+        self.displayed_last_turn_usage = TokenUsage::default();
+        self.usage_animation_base = TokenUsage::default();
+        self.turn_usage_resolved = true;
         self.context_usage = ContextUsage::default();
         self.push_system_block(
             &format!("{CLEAR_EVENT_SUMMARY}\n{HELP_HINT}"),
@@ -866,6 +880,10 @@ impl TuiApp {
         self.message_count = snapshot.message_count;
         self.cumulative_usage = TokenUsage::default();
         self.last_turn_usage = TokenUsage::default();
+        self.displayed_cumulative_usage = TokenUsage::default();
+        self.displayed_last_turn_usage = TokenUsage::default();
+        self.usage_animation_base = TokenUsage::default();
+        self.turn_usage_resolved = true;
         self.context_usage = ContextUsage::default();
 
         for message in &snapshot.messages {
@@ -894,6 +912,29 @@ impl TuiApp {
     fn open_usage_overlay(&mut self) {
         self.overlay = Overlay::Usage;
         self.push_event(EventKind::System, "Opened usage view".to_owned());
+    }
+
+    fn reset_turn_usage_animation(&mut self) {
+        self.last_turn_usage = TokenUsage::default();
+        self.displayed_last_turn_usage = TokenUsage::default();
+        self.usage_animation_base = self.cumulative_usage;
+        self.displayed_cumulative_usage = self.cumulative_usage;
+        self.turn_usage_resolved = false;
+    }
+
+    fn sync_usage_display(&mut self) {
+        self.displayed_cumulative_usage = self.cumulative_usage;
+        self.displayed_last_turn_usage = self.last_turn_usage;
+        self.usage_animation_base = self.cumulative_usage;
+        self.turn_usage_resolved = true;
+    }
+
+    fn animate_usage_display(&mut self) {
+        if self.busy && !self.turn_usage_resolved {
+            self.displayed_last_turn_usage = advance_pending_usage(self.displayed_last_turn_usage);
+            self.displayed_cumulative_usage =
+                add_usage(self.usage_animation_base, self.displayed_last_turn_usage);
+        }
     }
 
     fn open_context_overlay(&mut self) {
@@ -1090,9 +1131,9 @@ impl TuiApp {
         };
         let tokens_display = format!(
             "{}",
-            self.cumulative_usage
+            self.displayed_cumulative_usage
                 .prompt_tokens
-                .saturating_add(self.cumulative_usage.completion_tokens),
+                .saturating_add(self.displayed_cumulative_usage.completion_tokens),
         );
         let context_display = format!("{} messages", self.message_count);
         let metrics = Paragraph::new(vec![
@@ -1469,26 +1510,26 @@ fn render_config_lines(app: &TuiApp) -> Vec<Line<'static>> {
 }
 
 fn render_usage_lines(app: &TuiApp) -> Vec<Line<'static>> {
-    let cumulative_total = usage_total(app.cumulative_usage);
-    let last_total = usage_total(app.last_turn_usage);
+    let cumulative_total = usage_total(app.displayed_cumulative_usage);
+    let last_total = usage_total(app.displayed_last_turn_usage);
     vec![
         kv_line("Total tokens", cumulative_total.to_string()),
         kv_line(
             "Prompt tokens",
-            app.cumulative_usage.prompt_tokens.to_string(),
+            app.displayed_cumulative_usage.prompt_tokens.to_string(),
         ),
         kv_line(
             "Completion tokens",
-            app.cumulative_usage.completion_tokens.to_string(),
+            app.displayed_cumulative_usage.completion_tokens.to_string(),
         ),
         kv_line("Last turn total", last_total.to_string()),
         kv_line(
             "Last turn prompt",
-            app.last_turn_usage.prompt_tokens.to_string(),
+            app.displayed_last_turn_usage.prompt_tokens.to_string(),
         ),
         kv_line(
             "Last turn completion",
-            app.last_turn_usage.completion_tokens.to_string(),
+            app.displayed_last_turn_usage.completion_tokens.to_string(),
         ),
     ]
 }
@@ -1502,9 +1543,33 @@ fn render_stats_lines(app: &TuiApp) -> Vec<Line<'static>> {
         kv_line("Context used", format!("{}%", context.used_percent())),
         kv_line(
             "Cumulative tokens",
-            usage_total(app.cumulative_usage).to_string(),
+            usage_total(app.displayed_cumulative_usage).to_string(),
         ),
     ]
+}
+
+fn advance_pending_usage(current: TokenUsage) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: advance_pending_counter(current.prompt_tokens),
+        completion_tokens: advance_pending_counter(current.completion_tokens),
+        total_tokens: advance_pending_counter(current.total_tokens),
+    }
+}
+
+fn advance_pending_counter(current: u64) -> u64 {
+    current
+        .saturating_add(PENDING_USAGE_STEP)
+        .min(PENDING_USAGE_LIMIT)
+}
+
+fn add_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: left.prompt_tokens.saturating_add(right.prompt_tokens),
+        completion_tokens: left
+            .completion_tokens
+            .saturating_add(right.completion_tokens),
+        total_tokens: left.total_tokens.saturating_add(right.total_tokens),
+    }
 }
 
 fn kv_line(label: &str, value: impl Into<String>) -> Line<'static> {
@@ -1798,6 +1863,12 @@ fn bind_agent_callbacks(agent: &mut Agent, event_tx: &mpsc::UnboundedSender<Work
     }
     {
         let tx = event_tx.clone();
+        agent.on_usage(move |usage| {
+            let _ = tx.send(WorkerEvent::Usage(usage));
+        });
+    }
+    {
+        let tx = event_tx.clone();
         agent.on_tool_call(move |name, args| {
             let _ = tx.send(WorkerEvent::ToolCall {
                 name: name.to_owned(),
@@ -1985,6 +2056,11 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             WorkerEvent::State(state) => app.push_state(&state),
             WorkerEvent::Think(text) => app.push_think(&text),
             WorkerEvent::Delta(delta) => app.append_streaming_delta(&delta),
+            WorkerEvent::Usage(usage) => {
+                app.last_turn_usage.add_assign(&usage);
+                app.cumulative_usage.add_assign(&usage);
+                app.sync_usage_display();
+            }
             WorkerEvent::ToolCall { name, args } => app.push_tool_call(&name, &args),
             WorkerEvent::ToolResult { name, result } => app.push_tool_result(&name, &result),
             WorkerEvent::ChatDone {
@@ -1998,6 +2074,7 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                 app.message_count = message_count;
                 app.last_turn_usage = last_turn_usage;
                 app.cumulative_usage = usage;
+                app.sync_usage_display();
                 app.context_usage = context_usage;
                 match response {
                     Ok(text) => app.finalize_streaming(&text),
@@ -2014,6 +2091,7 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             } => {
                 app.message_count = message_count;
                 app.cumulative_usage = usage;
+                app.sync_usage_display();
                 app.context_usage = context_usage;
             }
             WorkerEvent::NewSession {
@@ -2034,6 +2112,7 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                 app.load_session_snapshot(session, &format!("已切换到会话：{session_id}"));
                 app.cumulative_usage = usage;
                 app.last_turn_usage = TokenUsage::default();
+                app.sync_usage_display();
                 app.context_usage = context_usage;
             }
             WorkerEvent::SessionList { sessions } => match sessions {
@@ -2187,6 +2266,7 @@ fn process_terminal_key(
                         app.push_error("无法发送请求到 Agent 线程。");
                     } else {
                         app.busy = true;
+                        app.reset_turn_usage_animation();
                     }
                 }
             }
@@ -2262,6 +2342,7 @@ pub async fn run(config: Config, work_dir: PathBuf) {
             break;
         }
 
+        app.animate_usage_display();
         let draw_result = terminal_guard.terminal.draw(|frame| app.draw(frame));
         if draw_result.is_err() {
             app.push_error("TUI 绘制失败，正在退出。");
@@ -2330,12 +2411,14 @@ mod tests {
     use std::sync::mpsc::channel;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use secaudit_agent::TokenUsage;
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::{
         DisplayMessage, DisplayRole, HELP_EVENT_SUMMARY, HELP_TEXT, InputBuffer,
-        MAX_WORKER_EVENTS_PER_TICK, SessionSnapshot, TuiApp, WorkerCommand, WorkerEvent,
-        is_quit_key, process_terminal_key, process_worker_events,
+        MAX_WORKER_EVENTS_PER_TICK, PENDING_USAGE_LIMIT, PENDING_USAGE_STEP, SessionSnapshot,
+        TuiApp, WorkerCommand, WorkerEvent, advance_pending_counter, is_quit_key,
+        process_terminal_key, process_worker_events, usage_total,
     };
 
     #[test]
@@ -2367,6 +2450,52 @@ mod tests {
             Some(HELP_EVENT_SUMMARY),
             "帮助事件应使用摘要文本"
         );
+    }
+
+    #[test]
+    fn pending_usage_counter_keeps_increasing() {
+        let next = advance_pending_counter(1_000);
+
+        assert!(next > 1_000);
+        assert!(next <= PENDING_USAGE_LIMIT);
+    }
+
+    #[test]
+    fn pending_usage_adds_to_confirmed_base() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        app.cumulative_usage = TokenUsage {
+            prompt_tokens: 800_000,
+            completion_tokens: 800_000,
+            total_tokens: 1_600_000,
+        };
+        app.sync_usage_display();
+        app.busy = true;
+        app.reset_turn_usage_animation();
+        app.animate_usage_display();
+
+        assert_eq!(
+            usage_total(app.displayed_cumulative_usage),
+            1_600_000 + PENDING_USAGE_STEP
+        );
+    }
+
+    #[test]
+    fn real_usage_syncs_display_immediately() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        app.busy = true;
+        app.reset_turn_usage_animation();
+        app.animate_usage_display();
+
+        app.cumulative_usage = TokenUsage {
+            prompt_tokens: 2_000,
+            completion_tokens: 2_000,
+            total_tokens: 4_000,
+        };
+        app.last_turn_usage = app.cumulative_usage;
+        app.sync_usage_display();
+
+        assert_eq!(usage_total(app.displayed_cumulative_usage), 4_000);
+        assert!(app.turn_usage_resolved);
     }
 
     #[test]

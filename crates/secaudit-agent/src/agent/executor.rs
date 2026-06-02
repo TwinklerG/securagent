@@ -1,7 +1,7 @@
 // ReAct 循环执行器
 
 use crate::error::Error;
-use crate::llm::{ChatMessage, HttpLlmClient, ToolCallResponse, ToolDefinition};
+use crate::llm::{ChatMessage, HttpLlmClient, TokenUsage, ToolCallResponse, ToolDefinition};
 use crate::tools::Tool;
 
 /// `ReAct` 单步执行结果
@@ -73,13 +73,14 @@ impl<'a> ReActExecutor<'a> {
     /// # Errors
     ///
     /// LLM 调用失败时返回 [`Error::Llm`]。
-    pub async fn step_stream<F>(&mut self, on_delta: F) -> Result<StepResult, Error>
+    pub async fn step_stream<F, U>(&mut self, on_delta: F, on_usage: U) -> Result<StepResult, Error>
     where
         F: FnMut(&str) + Send,
+        U: FnMut(TokenUsage) + Send,
     {
         let response = self
             .llm
-            .chat_stream(&self.messages, Some(&self.tool_defs), on_delta)
+            .chat_stream(&self.messages, Some(&self.tool_defs), on_delta, on_usage)
             .await?;
 
         self.messages.push(response.clone());
