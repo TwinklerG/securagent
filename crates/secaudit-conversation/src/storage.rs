@@ -322,7 +322,7 @@ impl ConversationLayout {
         for status in [SessionStatus::Active, SessionStatus::Archived] {
             let path = self.session_file(key, status, session_id);
             if path.exists() {
-                return RuntimeLayout::read_json(&path);
+                return Ok(RuntimeLayout::read_json(&path)?);
             }
         }
 
@@ -377,7 +377,7 @@ impl ConversationLayout {
 }
 
 fn read_project_metadata(path: &Path) -> Result<ProjectMetadata> {
-    RuntimeLayout::read_json(path)
+    Ok(RuntimeLayout::read_json(path)?)
 }
 
 fn stable_path_suffix(path: &Path) -> String {

@@ -1447,8 +1447,8 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             WorkerEvent::Think(text) => app.push_think(&text),
             WorkerEvent::Delta(delta) => app.append_streaming_delta(&delta),
             WorkerEvent::Usage(usage) => {
-                app.last_turn_usage.add_assign(&usage);
-                app.cumulative_usage.add_assign(&usage);
+                app.last_turn_usage += usage;
+                app.cumulative_usage += usage;
                 app.sync_usage_display();
             }
             WorkerEvent::ToolCall { name, args } => app.push_tool_call(&name, &args),
