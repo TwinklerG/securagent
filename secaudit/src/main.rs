@@ -11,7 +11,6 @@ mod output;
 use std::env;
 use std::fs;
 use std::io;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -21,9 +20,7 @@ use clap::{Parser, ValueEnum};
 use colored::Colorize;
 use secaudit_agent::strategy;
 use secaudit_agent::{Agent, to_multi_turn_sample};
-use secaudit_conversation::{ConversationService, SessionMetadata};
 use secaudit_core::Config;
-use serde::Serialize;
 
 use crate::headless::{
     HeadlessResponse, HeadlessResponseContext, SessionSnapshot, TraceRecorder, TurnRecord,
@@ -115,21 +112,6 @@ const CONFIRM_MODE_DENY: &str = "deny";
 /// 用户主动拒绝确认时的退出码
 const EXIT_USER_DENIED: i32 = 130;
 
-/// tool 调用拒绝的错误消息片段
-const MSG_USER_DENIED: &str = "用户拒绝执行该命令";
-
-#[derive(Serialize)]
-struct SessionListOutput<'a> {
-    status: &'static str,
-    sessions: &'a [SessionMetadata],
-}
-
-#[derive(Serialize)]
-struct ArchiveSessionOutput<'a> {
-    status: &'static str,
-    session: &'a SessionMetadata,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Mode {
     /// 自动模式：FILE 参数存在则单文件审计，否则进入交互模式
@@ -154,16 +136,6 @@ enum ConfirmMode {
     Ask,
 }
 
-impl ConfirmMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Deny => "deny",
-            Self::Allow => "allow",
-            Self::Ask => "ask",
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -177,33 +149,24 @@ async fn main() {
             return;
         }
 
-        // 加载配置
-        let config = match Config::load() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("{}: {e}", "配置错误".red().bold());
-                process::exit(1);
-            }
-        };
+        let config = load_config_or_exit();
         run_headless_chat(&cli, config).await;
     } else if let Some(target) = &cli.target {
-        let config = match Config::load() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("{}: {e}", "配置错误".red().bold());
-                process::exit(1);
-            }
-        };
+        let config = load_config_or_exit();
         run_single_file(&cli, config, target).await;
     } else {
-        let config = match Config::load() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("{}: {e}", "配置错误".red().bold());
-                process::exit(1);
-            }
-        };
+        let config = load_config_or_exit();
         run_interactive(config).await;
+    }
+}
+
+fn load_config_or_exit() -> Config {
+    match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{}: {error}", "配置错误".red().bold());
+            process::exit(1);
+        }
     }
 }
 
@@ -297,29 +260,28 @@ async fn run_single_file(cli: &Cli, mut config: Config, target: &str) {
 async fn run_headless_chat(cli: &Cli, config: Config) {
     let work_dir = current_work_dir();
     let work_dir_display = work_dir.display().to_string();
-    let inputs = resolve_chat_messages(cli);
-    let conversation = match ConversationService::with_default_storage() {
-        Ok(service) => service,
-        Err(error) => {
-            eprintln!("{}: {error}", "会话错误".red().bold());
-            process::exit(1);
-        }
-    };
+    let inputs = headless::resolve_chat_messages(
+        cli.messages_json.as_deref(),
+        cli.message.as_deref(),
+        read_stdin_to_string,
+    );
+    let conversation = headless::open_conversation_service_or_exit();
 
     let recorder = TraceRecorder::new();
     let confirm_mode = cli.confirm_mode;
-    let confirm_mode_name = confirm_mode.as_str().to_owned();
-    let confirm = build_confirm_callback(confirm_mode, recorder.clone());
+    let confirm_mode_name = headless::confirm_mode_name(confirm_mode).to_owned();
+    let confirm = headless::build_confirm_callback(confirm_mode, recorder.clone());
 
     let mut agent = Agent::new(config, work_dir.clone(), confirm);
     recorder.attach(&mut agent);
-    let mut managed_session = match load_or_start_session(&conversation, &work_dir, cli) {
-        Ok(session) => session,
-        Err(error) => {
-            eprintln!("{}: {error}", "会话错误".red().bold());
-            process::exit(1);
-        }
-    };
+    let mut managed_session =
+        match headless::load_or_start_session(&conversation, &work_dir, cli.session.as_deref()) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("{}: {error}", "会话错误".red().bold());
+                process::exit(1);
+            }
+        };
 
     let mut turns = Vec::new();
     let start = Instant::now();
@@ -380,10 +342,10 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
         HeadlessResponse::success(final_message, context)
     };
 
-    print_headless_response(cli.output_format, &response);
+    headless::print_response(cli.output_format, &response);
 
     if let Some(error) = failure {
-        if error.contains(MSG_USER_DENIED) {
+        if headless::is_user_denied_error(&error) {
             process::exit(EXIT_USER_DENIED);
         }
         process::exit(1);
@@ -391,243 +353,24 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
 }
 
 fn handle_headless_session_management(cli: &Cli) -> bool {
-    if !cli.list_sessions && cli.archive_session.is_none() {
-        return false;
-    }
-
     let work_dir = current_work_dir();
-    let service = match ConversationService::with_default_storage() {
-        Ok(service) => service,
-        Err(error) => {
-            eprintln!("{}: {error}", "会话错误".red().bold());
-            process::exit(1);
-        }
-    };
-
-    if cli.list_sessions {
-        match service.list_sessions(&work_dir) {
-            Ok(sessions) => print_session_list(cli.output_format, &sessions),
-            Err(error) => {
-                eprintln!("{}: {error}", "会话错误".red().bold());
-                process::exit(1);
-            }
-        }
-    }
-
-    if let Some(session_id) = &cli.archive_session {
-        match service.archive_session(&work_dir, session_id) {
-            Ok(metadata) => print_archived_session(cli.output_format, &metadata),
-            Err(error) => {
-                eprintln!("{}: {error}", "会话错误".red().bold());
-                process::exit(1);
-            }
-        }
-    }
-
-    true
-}
-
-fn load_or_start_session(
-    service: &ConversationService,
-    work_dir: &Path,
-    cli: &Cli,
-) -> secaudit_conversation::Result<secaudit_conversation::ManagedSession> {
-    if let Some(session_id) = &cli.session {
-        service.load_session(work_dir, session_id)
-    } else {
-        service.start_session(work_dir)
-    }
-}
-
-fn print_session_list(output_format: OutputFormat, sessions: &[SessionMetadata]) {
-    match output_format {
-        OutputFormat::Json => {
-            let output = SessionListOutput {
-                status: "success",
-                sessions,
-            };
-            print_json_or_exit(&output);
-        }
-        OutputFormat::Text => {
-            println!("{}", "secaudit chat 会话列表".green().bold());
-            if sessions.is_empty() {
-                println!("当前项目没有历史会话。");
-                return;
-            }
-            for session in sessions {
-                println!(
-                    "{}  {}  {}  messages={}  {}",
-                    session.session_id,
-                    session.status,
-                    session.updated_at,
-                    session.message_count,
-                    session.title
-                );
-            }
-        }
-    }
-}
-
-fn print_archived_session(output_format: OutputFormat, session: &SessionMetadata) {
-    match output_format {
-        OutputFormat::Json => {
-            let output = ArchiveSessionOutput {
-                status: "success",
-                session,
-            };
-            print_json_or_exit(&output);
-        }
-        OutputFormat::Text => {
-            println!("{}", "secaudit chat 会话已归档".green().bold());
-            println!("会话：{}", session.session_id);
-            println!("状态：{}", session.status);
-            println!("更新时间：{}", session.updated_at);
-        }
-    }
-}
-
-fn print_json_or_exit<T: Serialize>(value: &T) {
-    match serde_json::to_string_pretty(value) {
-        Ok(json) => println!("{json}"),
-        Err(error) => {
-            eprintln!("{}: JSON 序列化失败：{error}", "错误".red().bold());
-            process::exit(1);
-        }
-    }
+    headless::handle_session_management_request(
+        cli.list_sessions,
+        cli.archive_session.as_deref(),
+        cli.output_format,
+        &work_dir,
+    )
 }
 
 fn current_work_dir() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn resolve_chat_messages(cli: &Cli) -> Vec<String> {
-    if let Some(messages_json) = &cli.messages_json {
-        match serde_json::from_str::<Vec<String>>(messages_json) {
-            Ok(messages) => {
-                let filtered: Vec<String> = messages
-                    .into_iter()
-                    .map(|message| message.trim().to_owned())
-                    .filter(|message| !message.is_empty())
-                    .collect();
-                if !filtered.is_empty() {
-                    return filtered;
-                }
-            }
-            Err(_) => {
-                return vec![messages_json.trim().to_owned()];
-            }
-        }
-    }
-
-    if let Some(message) = &cli.message {
-        return vec![message.clone()];
-    }
-
+fn read_stdin_to_string() -> Option<String> {
     let mut stdin = String::new();
-    match io::stdin().read_to_string(&mut stdin) {
-        Ok(_) => {
-            let trimmed = stdin.trim();
-            if trimmed.is_empty() {
-                vec!["请审计当前工作目录的安全风险，并给出高优先级问题清单。".to_owned()]
-            } else {
-                let parsed_json = serde_json::from_str::<Vec<String>>(trimmed);
-                if let Ok(messages) = parsed_json {
-                    let filtered: Vec<String> = messages
-                        .into_iter()
-                        .map(|message| message.trim().to_owned())
-                        .filter(|message| !message.is_empty())
-                        .collect();
-                    if !filtered.is_empty() {
-                        return filtered;
-                    }
-                }
-
-                vec![trimmed.to_owned()]
-            }
-        }
-        Err(_) => vec!["请审计当前工作目录的安全风险，并给出高优先级问题清单。".to_owned()],
-    }
-}
-
-fn build_confirm_callback(
-    mode: ConfirmMode,
-    recorder: TraceRecorder,
-) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
-    Arc::new(move |prompt: &str| {
-        let (approved, source) = match mode {
-            ConfirmMode::Allow => (true, "auto_allow"),
-            ConfirmMode::Deny => (false, "auto_deny"),
-            ConfirmMode::Ask => {
-                eprint!("{} {} [y/N] ", "[确认]".yellow().bold(), prompt);
-                let _ = io::Write::flush(&mut io::stderr());
-
-                let mut input = String::new();
-                let approved = match io::stdin().read_line(&mut input) {
-                    Ok(_) => matches!(input.trim().to_lowercase().as_str(), "y" | "yes"),
-                    Err(_) => false,
-                };
-                (approved, "stdin_prompt")
-            }
-        };
-
-        recorder.record_confirm(prompt, approved, mode.as_str(), source);
-        approved
-    })
-}
-
-fn print_headless_response(output_format: OutputFormat, response: &HeadlessResponse) {
-    match output_format {
-        OutputFormat::Json => match serde_json::to_string_pretty(response) {
-            Ok(json) => println!("{json}"),
-            Err(e) => {
-                eprintln!("{}: 非交互结果序列化失败：{e}", "错误".red().bold());
-                process::exit(1);
-            }
-        },
-        OutputFormat::Text => match response {
-            HeadlessResponse::Success {
-                final_message,
-                duration_ms,
-                work_dir,
-                confirm_mode,
-                turns,
-                session_management,
-                ..
-            } => {
-                println!("{}", "secaudit chat 执行成功".green().bold());
-                println!("工作目录：{work_dir}");
-                println!("确认模式：{confirm_mode}");
-                println!("轮次：{}", turns.len());
-                println!("耗时：{duration_ms} ms");
-                if let Some(info) = session_management {
-                    println!("会话：{} ({})", info.project_key, info.status);
-                    println!("会话文件：{}", info.session_path);
-                }
-                output::cli::print_separator();
-                println!("{final_message}");
-            }
-            HeadlessResponse::Error {
-                error,
-                duration_ms,
-                work_dir,
-                confirm_mode,
-                turns,
-                session_management,
-                ..
-            } => {
-                eprintln!("{}", "secaudit chat 执行失败".red().bold());
-                eprintln!("工作目录：{work_dir}");
-                eprintln!("确认模式：{confirm_mode}");
-                eprintln!("轮次：{}", turns.len());
-                eprintln!("耗时：{duration_ms} ms");
-                if let Some(info) = session_management {
-                    eprintln!("会话：{} ({})", info.project_key, info.status);
-                    eprintln!("会话文件：{}", info.session_path);
-                }
-                eprintln!("错误：{error}");
-            }
-        },
-    }
+    io::Read::read_to_string(&mut io::stdin(), &mut stdin)
+        .ok()
+        .map(|_| stdin)
 }
 
 /// 根据文件扩展名检测编程语言
@@ -648,7 +391,7 @@ fn detect_language(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfirmMode, Mode, OutputFormat, detect_language, resolve_chat_messages};
+    use super::{ConfirmMode, Mode, OutputFormat, detect_language};
     use clap::ValueEnum;
 
     #[test]
@@ -674,26 +417,5 @@ mod tests {
         assert!(modes.contains(&ConfirmMode::Deny));
         assert!(modes.contains(&ConfirmMode::Allow));
         assert!(modes.contains(&ConfirmMode::Ask));
-    }
-
-    #[test]
-    fn resolve_messages_prefers_json_list() {
-        let cli = super::Cli {
-            target: None,
-            language: None,
-            format: "text".to_owned(),
-            output: None,
-            mode: Mode::Chat,
-            strategy: "react".to_owned(),
-            message: None,
-            messages_json: Some("[\"a\",\"b\"]".to_owned()),
-            confirm_mode: ConfirmMode::Deny,
-            output_format: OutputFormat::Json,
-            session: None,
-            list_sessions: false,
-            archive_session: None,
-        };
-
-        assert_eq!(resolve_chat_messages(&cli), vec!["a", "b"]);
     }
 }

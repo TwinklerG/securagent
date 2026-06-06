@@ -1,10 +1,38 @@
 //! 非交互调试模式：记录轨迹并输出结构化 JSON。
 
+use std::fmt::Display;
+use std::io::{self, Write};
+use std::path::Path;
+use std::process;
 use std::sync::{Arc, Mutex};
 
+use colored::Colorize;
 use secaudit_agent::{Agent, ChatMessage, Session, TokenUsage};
-use secaudit_conversation::SessionManagementInfo;
+use secaudit_conversation::{
+    ConversationService, ManagedSession, SessionManagementInfo, SessionMetadata,
+};
 use serde::Serialize;
+
+use crate::output;
+use crate::{ConfirmMode, OutputFormat};
+
+#[derive(Serialize)]
+struct SessionListOutput<'a> {
+    status: &'static str,
+    sessions: &'a [SessionMetadata],
+}
+
+#[derive(Serialize)]
+struct ArchiveSessionOutput<'a> {
+    status: &'static str,
+    session: &'a SessionMetadata,
+}
+
+const DEFAULT_CHAT_MESSAGE: &str = "请审计当前工作目录的安全风险，并给出高优先级问题清单。";
+const MSG_USER_DENIED: &str = "用户拒绝执行该命令";
+const CONFIRM_SOURCE_AUTO_ALLOW: &str = "auto_allow";
+const CONFIRM_SOURCE_AUTO_DENY: &str = "auto_deny";
+const CONFIRM_SOURCE_STDIN_PROMPT: &str = "stdin_prompt";
 
 /// 工具调用记录。
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -222,6 +250,162 @@ pub fn collect_session_metrics(messages: &[ChatMessage]) -> SessionMetrics {
     SessionMetrics { token_usage }
 }
 
+/// 确认模式稳定字符串。
+#[must_use]
+pub(crate) const fn confirm_mode_name(mode: ConfirmMode) -> &'static str {
+    match mode {
+        ConfirmMode::Deny => "deny",
+        ConfirmMode::Allow => "allow",
+        ConfirmMode::Ask => "ask",
+    }
+}
+
+/// 构造 headless 模式的确认回调。
+pub(crate) fn build_confirm_callback(
+    mode: ConfirmMode,
+    recorder: TraceRecorder,
+) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+    Arc::new(move |prompt: &str| {
+        let (approved, source) = match mode {
+            ConfirmMode::Allow => (true, CONFIRM_SOURCE_AUTO_ALLOW),
+            ConfirmMode::Deny => (false, CONFIRM_SOURCE_AUTO_DENY),
+            ConfirmMode::Ask => ask_user_confirm(prompt),
+        };
+
+        recorder.record_confirm(prompt, approved, confirm_mode_name(mode), source);
+        approved
+    })
+}
+
+/// 判断错误是否来自用户拒绝确认。
+#[must_use]
+pub(crate) fn is_user_denied_error(error: &str) -> bool {
+    error.contains(MSG_USER_DENIED)
+}
+
+/// 打开默认会话服务；失败时按 CLI 约定输出错误并退出。
+pub(crate) fn open_conversation_service_or_exit() -> ConversationService {
+    match ConversationService::with_default_storage() {
+        Ok(service) => service,
+        Err(error) => exit_session_error(error),
+    }
+}
+
+/// 处理 headless 会话管理请求。
+///
+/// 返回 `true` 表示已处理管理请求，调用方无需继续执行 chat。
+pub(crate) fn handle_session_management_request(
+    list_sessions: bool,
+    archive_session: Option<&str>,
+    output_format: OutputFormat,
+    work_dir: &Path,
+) -> bool {
+    if !list_sessions && archive_session.is_none() {
+        return false;
+    }
+
+    let service = open_conversation_service_or_exit();
+
+    if list_sessions {
+        match service.list_sessions(work_dir) {
+            Ok(sessions) => print_session_list(output_format, &sessions),
+            Err(error) => exit_session_error(error),
+        }
+    }
+
+    if let Some(session_id) = archive_session {
+        match service.archive_session(work_dir, session_id) {
+            Ok(metadata) => print_archived_session(output_format, &metadata),
+            Err(error) => exit_session_error(error),
+        }
+    }
+
+    true
+}
+
+/// 按可选 session id 加载既有会话；未指定时创建新会话。
+pub(crate) fn load_or_start_session(
+    service: &ConversationService,
+    work_dir: &Path,
+    session_id: Option<&str>,
+) -> secaudit_conversation::Result<ManagedSession> {
+    if let Some(session_id) = session_id {
+        service.load_session(work_dir, session_id)
+    } else {
+        service.start_session(work_dir)
+    }
+}
+
+fn ask_user_confirm(prompt: &str) -> (bool, &'static str) {
+    eprint!("{} {} [y/N] ", "[确认]".yellow().bold(), prompt);
+    let _ = Write::flush(&mut io::stderr());
+
+    let mut input = String::new();
+    let approved = match io::stdin().read_line(&mut input) {
+        Ok(_) => matches!(input.trim().to_lowercase().as_str(), "y" | "yes"),
+        Err(_) => false,
+    };
+    (approved, CONFIRM_SOURCE_STDIN_PROMPT)
+}
+
+fn exit_session_error(error: impl Display) -> ! {
+    eprintln!("{}: {error}", "会话错误".red().bold());
+    process::exit(1);
+}
+
+/// 解析 headless chat 输入消息。
+///
+/// 优先级：`--messages-json` > `--message` > stdin > 默认审计请求。
+pub(crate) fn resolve_chat_messages<F>(
+    messages_json: Option<&str>,
+    message: Option<&str>,
+    read_stdin: F,
+) -> Vec<String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    if let Some(messages_json) = messages_json
+        && let Some(messages) = parse_message_list(messages_json)
+    {
+        return messages;
+    }
+
+    if let Some(message) = message {
+        return vec![message.to_owned()];
+    }
+
+    let Some(stdin) = read_stdin() else {
+        return default_chat_messages();
+    };
+    let trimmed = stdin.trim();
+    if trimmed.is_empty() {
+        return default_chat_messages();
+    }
+
+    parse_message_list(trimmed).unwrap_or_else(|| vec![trimmed.to_owned()])
+}
+
+fn parse_message_list(raw: &str) -> Option<Vec<String>> {
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(messages) => non_empty_messages(messages),
+        Err(_) => Some(vec![raw.trim().to_owned()]),
+    }
+}
+
+fn non_empty_messages(messages: Vec<String>) -> Option<Vec<String>> {
+    let filtered = messages
+        .into_iter()
+        .map(|message| message.trim().to_owned())
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>();
+
+    (!filtered.is_empty()).then_some(filtered)
+}
+
+fn default_chat_messages() -> Vec<String> {
+    vec![DEFAULT_CHAT_MESSAGE.to_owned()]
+}
+
 /// 非交互模式输出。
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -230,50 +414,22 @@ pub enum HeadlessResponse {
     Success {
         /// Agent 最终回复。
         final_message: String,
-        /// 用户输入与输出轮次。
-        turns: Vec<TurnRecord>,
-        /// 轨迹信息（状态、思考、工具、确认）。
-        trace: TraceSnapshot,
-        /// 会话快照。
-        session: SessionSnapshot,
-        /// 会话统计。
-        metrics: SessionMetrics,
-        /// 总耗时（毫秒）。
-        duration_ms: u64,
-        /// 工作目录。
-        work_dir: String,
-        /// 确认模式。
-        confirm_mode: String,
-        /// 会话管理信息。
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_management: Option<SessionManagementInfo>,
+        /// 成功与失败响应共享的上下文。
+        #[serde(flatten)]
+        context: HeadlessResponseContext,
     },
     /// 执行失败。
     Error {
         /// 错误信息。
         error: String,
-        /// 已执行轮次。
-        turns: Vec<TurnRecord>,
-        /// 轨迹信息（状态、思考、工具、确认）。
-        trace: TraceSnapshot,
-        /// 会话快照。
-        session: SessionSnapshot,
-        /// 会话统计。
-        metrics: SessionMetrics,
-        /// 总耗时（毫秒）。
-        duration_ms: u64,
-        /// 工作目录。
-        work_dir: String,
-        /// 确认模式。
-        confirm_mode: String,
-        /// 会话管理信息。
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_management: Option<SessionManagementInfo>,
+        /// 成功与失败响应共享的上下文。
+        #[serde(flatten)]
+        context: HeadlessResponseContext,
     },
 }
 
 /// 非交互响应的公共上下文。
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct HeadlessResponseContext {
     /// 用户输入与输出轮次。
     pub turns: Vec<TurnRecord>,
@@ -290,6 +446,7 @@ pub struct HeadlessResponseContext {
     /// 确认模式。
     pub confirm_mode: String,
     /// 会话管理信息。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_management: Option<SessionManagementInfo>,
 }
 
@@ -297,52 +454,117 @@ impl HeadlessResponse {
     /// 构造成功响应。
     #[must_use]
     pub fn success(final_message: String, context: HeadlessResponseContext) -> Self {
-        let HeadlessResponseContext {
-            turns,
-            trace,
-            session,
-            metrics,
-            duration_ms,
-            work_dir,
-            confirm_mode,
-            session_management,
-        } = context;
         Self::Success {
             final_message,
-            turns,
-            trace,
-            session,
-            metrics,
-            duration_ms,
-            work_dir,
-            confirm_mode,
-            session_management,
+            context,
         }
     }
 
     /// 构造失败响应。
     #[must_use]
     pub fn error(error: String, context: HeadlessResponseContext) -> Self {
-        let HeadlessResponseContext {
-            turns,
-            trace,
-            session,
-            metrics,
-            duration_ms,
-            work_dir,
-            confirm_mode,
-            session_management,
-        } = context;
-        Self::Error {
-            error,
-            turns,
-            trace,
-            session,
-            metrics,
-            duration_ms,
-            work_dir,
-            confirm_mode,
-            session_management,
+        Self::Error { error, context }
+    }
+}
+
+/// 按 CLI 输出格式打印会话列表。
+pub(crate) fn print_session_list(output_format: OutputFormat, sessions: &[SessionMetadata]) {
+    match output_format {
+        OutputFormat::Json => {
+            let output = SessionListOutput {
+                status: "success",
+                sessions,
+            };
+            print_json_or_exit(&output);
+        }
+        OutputFormat::Text => {
+            println!("{}", "secaudit chat 会话列表".green().bold());
+            if sessions.is_empty() {
+                println!("当前项目没有历史会话。");
+                return;
+            }
+            for session in sessions {
+                println!(
+                    "{}  {}  {}  messages={}  {}",
+                    session.session_id,
+                    session.status,
+                    session.updated_at,
+                    session.message_count,
+                    session.title
+                );
+            }
+        }
+    }
+}
+
+/// 按 CLI 输出格式打印归档结果。
+pub(crate) fn print_archived_session(output_format: OutputFormat, session: &SessionMetadata) {
+    match output_format {
+        OutputFormat::Json => {
+            let output = ArchiveSessionOutput {
+                status: "success",
+                session,
+            };
+            print_json_or_exit(&output);
+        }
+        OutputFormat::Text => {
+            println!("{}", "secaudit chat 会话已归档".green().bold());
+            println!("会话：{}", session.session_id);
+            println!("状态：{}", session.status);
+            println!("更新时间：{}", session.updated_at);
+        }
+    }
+}
+
+/// 按 CLI 输出格式打印 headless chat 响应。
+pub(crate) fn print_response(output_format: OutputFormat, response: &HeadlessResponse) {
+    match output_format {
+        OutputFormat::Json => match serde_json::to_string_pretty(response) {
+            Ok(json) => println!("{json}"),
+            Err(e) => {
+                eprintln!("{}: 非交互结果序列化失败：{e}", "错误".red().bold());
+                process::exit(1);
+            }
+        },
+        OutputFormat::Text => match response {
+            HeadlessResponse::Success {
+                final_message,
+                context,
+            } => {
+                println!("{}", "secaudit chat 执行成功".green().bold());
+                println!("工作目录：{}", context.work_dir);
+                println!("确认模式：{}", context.confirm_mode);
+                println!("轮次：{}", context.turns.len());
+                println!("耗时：{} ms", context.duration_ms);
+                if let Some(info) = &context.session_management {
+                    println!("会话：{} ({})", info.project_key, info.status);
+                    println!("会话文件：{}", info.session_path);
+                }
+                output::cli::print_separator();
+                println!("{final_message}");
+            }
+            HeadlessResponse::Error { error, context } => {
+                eprintln!("{}", "secaudit chat 执行失败".red().bold());
+                eprintln!("工作目录：{}", context.work_dir);
+                eprintln!("确认模式：{}", context.confirm_mode);
+                eprintln!("轮次：{}", context.turns.len());
+                eprintln!("耗时：{} ms", context.duration_ms);
+                if let Some(info) = &context.session_management {
+                    eprintln!("会话：{} ({})", info.project_key, info.status);
+                    eprintln!("会话文件：{}", info.session_path);
+                }
+                eprintln!("错误：{error}");
+            }
+        },
+    }
+}
+
+fn print_json_or_exit<T: Serialize>(value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => println!("{json}"),
+        Err(error) => {
+            eprintln!("{}: JSON 序列化失败：{error}", "错误".red().bold());
+            process::exit(1);
         }
     }
 }
@@ -351,7 +573,7 @@ impl HeadlessResponse {
 mod tests {
     use super::{
         HeadlessResponse, HeadlessResponseContext, SessionMetrics, SessionSnapshot, ToolCallRecord,
-        TraceRecorder, TraceSnapshot, TurnRecord,
+        TraceRecorder, TraceSnapshot, TurnRecord, resolve_chat_messages,
     };
     use secaudit_agent::TokenUsage;
 
@@ -422,6 +644,41 @@ mod tests {
                 value.get("status").and_then(serde_json::Value::as_str),
                 Some("success")
             );
+            assert_eq!(
+                value
+                    .get("final_message")
+                    .and_then(serde_json::Value::as_str),
+                Some("done")
+            );
+            assert!(value.get("turns").is_some());
+            assert!(value.get("trace").is_some());
+            assert!(value.get("session").is_some());
+            assert!(value.get("metrics").is_some());
+            assert!(value.get("session_management").is_none());
         }
+    }
+
+    #[test]
+    fn resolve_messages_prefers_json_list() {
+        let messages =
+            resolve_chat_messages(Some("[\"a\",\"b\"]"), None, || Some("ignored".to_owned()));
+
+        assert_eq!(messages, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn resolve_messages_falls_back_to_raw_invalid_json_arg() {
+        let messages = resolve_chat_messages(Some("not json"), None, || None);
+
+        assert_eq!(messages, vec!["not json"]);
+    }
+
+    #[test]
+    fn resolve_messages_reads_stdin_json_when_no_arg_exists() {
+        let messages = resolve_chat_messages(None, None, || {
+            Some("[\" first \",\"\", \"second\"]".to_owned())
+        });
+
+        assert_eq!(messages, vec!["first", "second"]);
     }
 }
