@@ -5,9 +5,10 @@ use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError, Sender as StdSender};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use secaudit_agent::{Agent, ChatMessage, Role};
+use secaudit_agent::{Agent, ChatMessage, Role, TokenUsage};
 use secaudit_conversation::{
-    ConversationService, ManagedSession, SessionListItem, SessionPreviewRole, SessionStatus,
+    ConversationConfig, ConversationService, ManagedSession, SessionListItem,
+    SessionManagementInfo, SessionPreviewRole, SessionStatus,
 };
 use secaudit_core::Config;
 use tauri::{AppHandle, Emitter};
@@ -15,14 +16,19 @@ use tokio::sync::Mutex;
 
 use crate::dto::{
     AgentEvent, AgentWorkbench, CommandApprovalRequest, CommandApprovalResolution,
-    ConversationPanel, FindingEvidence, FindingPreview, FindingSeverity, FindingStatus, GuiMessage,
-    GuiSessionListItem, ProjectPanel, RunPanel, RunPhase, TraceEvent, TraceEventKind,
+    ConversationPanel, FindingEvidence, FindingPreview, FindingSeverity, FindingStatus,
+    GuiContextUsage, GuiMessage, GuiSessionListItem, GuiTokenUsage, ProjectPanel, RunPanel,
+    RunPhase, StatusPanel, TraceEvent, TraceEventKind,
 };
 use crate::tools::tool_capabilities;
 
 const EVENT_AGENT: &str = "agent-event";
 const FALLBACK_WORK_DIR: &str = ".";
 const MSG_CONFIG_HINT: &str = "请先通过 ~/.secaudit/config.json 或 SECAUDIT_API_KEY 配置 Agent 凭据。可选配置：SECAUDIT_API_BASE_URL、SECAUDIT_MODEL、SECAUDIT_MAX_ITERATIONS、SECAUDIT_STRATEGY。";
+const STATUS_AGENT_BLOCKED: &str = "配置缺失";
+const STATUS_AGENT_READY: &str = "就绪";
+const STATUS_AGENT_RUNNING: &str = "运行中";
+const STATUS_MODEL_FALLBACK: &str = "未配置";
 const ROOT_MARKER_CRATES: &str = "crates";
 const ROOT_MARKER_JUSTFILE: &str = "justfile";
 const RUN_ACTION_AUDIT: &str = "发送审计请求";
@@ -87,9 +93,17 @@ pub(crate) struct GuiRuntime {
     session: ManagedSession,
     agent: Option<Agent>,
     config_error: Option<String>,
+    model: Option<String>,
     run_phase: RunPhase,
     trace: SharedTrace,
     approvals: CommandApprovalBroker,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StatusCounts {
+    trace: usize,
+    tool: usize,
+    finding: usize,
 }
 
 struct TraceBuffer {
@@ -294,13 +308,15 @@ impl CommandApprovalBroker {
 impl GuiRuntime {
     pub(crate) fn new(app: &AppHandle, approvals: CommandApprovalBroker) -> Result<Self, String> {
         let work_dir = default_work_dir();
-        let conversation = ConversationService::with_default_storage().map_err(to_error_text)?;
+        let config = load_agent_config();
+        let conversation = build_conversation(config.as_ref().ok())?;
         let session = conversation
             .start_session(work_dir.as_path())
             .map_err(to_error_text)?;
         let trace = new_trace_buffer();
         approvals.attach_trace(Arc::clone(&trace));
-        let (agent, config_error) = build_agent(app, work_dir.clone(), &trace, &approvals);
+        let model = config.as_ref().ok().map(|config| config.model.clone());
+        let (agent, config_error) = build_agent(app, work_dir.clone(), &trace, &approvals, config);
         let run_phase = idle_run_phase(agent.is_some());
         let mut runtime = Self {
             work_dir,
@@ -308,6 +324,7 @@ impl GuiRuntime {
             session,
             agent,
             config_error,
+            model,
             run_phase,
             trace,
             approvals,
@@ -330,11 +347,22 @@ impl GuiRuntime {
             .unwrap_or_default();
         let sessions = with_current_session_item(sessions, &self.session);
         let messages = GuiMessage::from_agent_history(self.session.session().messages());
+        let tools = tool_capabilities(self.agent.as_ref(), &self.work_dir);
+        let trace = trace_snapshot(&self.trace);
+        let findings = finding_previews(self.session.session().messages());
+        let status = self.status_panel(
+            &management,
+            StatusCounts {
+                trace: trace.len(),
+                tool: tools.len(),
+                finding: findings.len(),
+            },
+        );
 
         AgentWorkbench {
             project: ProjectPanel {
                 work_dir: display_path(&self.work_dir),
-                storage_root: management.storage_root,
+                storage_root: management.storage_root.clone(),
                 config_ready: self.agent.is_some(),
                 config_error: self.config_error.clone(),
             },
@@ -345,9 +373,10 @@ impl GuiRuntime {
                 sessions,
             },
             run: self.run_panel(),
-            tools: tool_capabilities(self.agent.as_ref(), &self.work_dir),
-            trace: trace_snapshot(&self.trace),
-            findings: finding_previews(self.session.session().messages()),
+            status,
+            tools,
+            trace,
+            findings,
         }
     }
 
@@ -435,14 +464,22 @@ impl GuiRuntime {
                 return Err(message);
             }
         };
-        let session = self.conversation.start_session(work_dir.as_path());
+        let config = load_agent_config();
+        let conversation = self.trace_result(
+            TRACE_TITLE_WORK_DIR_SWITCH_FAILED,
+            build_conversation(config.as_ref().ok()),
+        )?;
+        let session = conversation.start_session(work_dir.as_path());
         let session = self.trace_result(TRACE_TITLE_WORK_DIR_SWITCH_FAILED, session)?;
+        let model = config.as_ref().ok().map(|config| config.model.clone());
         let (agent, config_error) =
-            build_agent(app, work_dir.clone(), &self.trace, &self.approvals);
+            build_agent(app, work_dir.clone(), &self.trace, &self.approvals, config);
         self.work_dir = work_dir;
+        self.conversation = conversation;
         self.session = session;
         self.agent = agent;
         self.config_error = config_error;
+        self.model = model;
         self.run_phase = self.current_idle_run_phase();
         clear_trace(&self.trace);
         self.push_trace(
@@ -474,6 +511,40 @@ impl GuiRuntime {
                     .unwrap_or_else(|| RUN_STATUS_BLOCKED.to_owned());
                 blocked_run_panel(status_detail)
             }
+        }
+    }
+
+    fn status_panel(
+        &self,
+        management: &SessionManagementInfo,
+        counts: StatusCounts,
+    ) -> StatusPanel {
+        let context = self.conversation.context_usage(&self.session);
+        let active_context = self.conversation.active_context_usage(&self.session);
+
+        StatusPanel {
+            agent_label: self.agent_status_label().to_owned(),
+            model: self
+                .model
+                .clone()
+                .unwrap_or_else(|| STATUS_MODEL_FALLBACK.to_owned()),
+            session_status: management.status.to_string(),
+            session_path: management.session_path.clone(),
+            token_usage: GuiTokenUsage::from_token_usage(context.cumulative_usage),
+            context: GuiContextUsage::from_context_usage(&context),
+            active_context: GuiContextUsage::from_context_usage(&active_context),
+            message_count: self.session.session().messages().len(),
+            trace_count: counts.trace,
+            tool_count: counts.tool,
+            finding_count: counts.finding,
+        }
+    }
+
+    fn agent_status_label(&self) -> &'static str {
+        match self.run_phase {
+            RunPhase::Running => STATUS_AGENT_RUNNING,
+            RunPhase::Ready if self.agent.is_some() => STATUS_AGENT_READY,
+            RunPhase::Ready | RunPhase::Blocked => STATUS_AGENT_BLOCKED,
         }
     }
 
@@ -551,8 +622,9 @@ fn build_agent(
     work_dir: PathBuf,
     trace: &SharedTrace,
     approvals: &CommandApprovalBroker,
+    config: Result<Config, String>,
 ) -> (Option<Agent>, Option<String>) {
-    let config = match Config::load() {
+    let config = match config {
         Ok(config) => config,
         Err(error) => return (None, Some(format!("{MSG_CONFIG_HINT} 原因：{error}"))),
     };
@@ -567,6 +639,20 @@ fn build_agent(
     let mut agent = Agent::new(config, work_dir, confirm);
     bind_agent_events(&mut agent, app, trace);
     (Some(agent), None)
+}
+
+fn load_agent_config() -> Result<Config, String> {
+    Config::load().map_err(to_error_text)
+}
+
+fn build_conversation(config: Option<&Config>) -> Result<ConversationService, String> {
+    let conversation_config = match config {
+        Some(config) => ConversationConfig::default_storage()
+            .map_err(to_error_text)?
+            .with_context_model(config.context_window_tokens, config.model.clone()),
+        None => ConversationConfig::default_storage().map_err(to_error_text)?,
+    };
+    Ok(ConversationService::new(conversation_config))
 }
 
 fn bind_agent_events(agent: &mut Agent, app: &AppHandle, trace: &SharedTrace) {
@@ -595,6 +681,13 @@ fn bind_agent_events(agent: &mut Agent, app: &AppHandle, trace: &SharedTrace) {
         let trace = Arc::clone(trace);
         agent.on_token(move |delta| {
             emit_live_agent_event(&app, &trace, TraceEventKind::Token, "流式输出", delta);
+        });
+    }
+    {
+        let app = app.clone();
+        let trace = Arc::clone(trace);
+        agent.on_usage(move |usage| {
+            emit_usage_agent_event(&app, &trace, usage);
         });
     }
     {
@@ -659,6 +752,20 @@ fn emit_live_agent_event(
     );
 }
 
+fn emit_usage_agent_event(app: &AppHandle, trace: &SharedTrace, usage: TokenUsage) {
+    let Some(trace) = next_trace_event(trace, TraceEventKind::Token, "Token 用量", "", false)
+    else {
+        return;
+    };
+    let event = AgentEvent {
+        trace,
+        approval_request: None,
+        approval_resolution: None,
+        token_usage: Some(GuiTokenUsage::from_token_usage(usage)),
+    };
+    let _ = app.emit(EVENT_AGENT, event);
+}
+
 fn emit_agent_event(
     app: &AppHandle,
     trace: &SharedTrace,
@@ -681,6 +788,7 @@ fn emit_agent_event(
         trace,
         approval_request: approval.request,
         approval_resolution: approval.resolution,
+        token_usage: None,
     };
     let _ = app.emit(EVENT_AGENT, event);
 }

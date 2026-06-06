@@ -104,6 +104,7 @@ function emitPreviewApprovalResolution(id: number, approved: boolean) {
       approved,
       statusLabel,
     },
+    tokenUsage: null,
   };
   for (const handler of previewAgentEventHandlers) {
     handler(event);

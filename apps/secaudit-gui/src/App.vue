@@ -26,6 +26,7 @@ import type {
   AgentWorkbench,
   CommandApprovalRequest,
   GuiMessage,
+  GuiTokenUsage,
   TraceEvent,
 } from "./types";
 
@@ -68,6 +69,7 @@ const tools = computed(() => workbench.value?.tools ?? []);
 const findings = computed(() => workbench.value?.findings ?? []);
 const project = computed(() => workbench.value?.project ?? null);
 const run = computed(() => workbench.value?.run ?? null);
+const status = computed(() => workbench.value?.status ?? null);
 const runBusy = computed(() => requestPending.value || Boolean(run.value?.busy));
 const activeSessionId = computed(() => workbench.value?.conversation.activeSessionId ?? null);
 
@@ -222,6 +224,7 @@ function handleAgentEvent(event: AgentEvent) {
     return;
   }
 
+  applyLiveTokenUsage(event.tokenUsage);
   if (isPersistentTraceEvent(event.trace)) {
     workbench.value = {
       ...workbench.value,
@@ -229,6 +232,25 @@ function handleAgentEvent(event: AgentEvent) {
     };
   }
   applyLiveAssistantEvent(event.trace);
+}
+
+function applyLiveTokenUsage(usage: GuiTokenUsage | null) {
+  if (!usage || !requestPending.value || !workbench.value) {
+    return;
+  }
+
+  const tokenUsage = workbench.value.status.tokenUsage;
+  workbench.value = {
+    ...workbench.value,
+    status: {
+      ...workbench.value.status,
+      tokenUsage: {
+        prompt: tokenUsage.prompt + usage.prompt,
+        completion: tokenUsage.completion + usage.completion,
+        total: tokenUsage.total + usage.total,
+      },
+    },
+  };
 }
 
 function handleOpsRailWidth(width: number) {
@@ -351,6 +373,7 @@ function isPersistentTraceEvent(event: TraceEvent): boolean {
 
     <OpsRail
       :trace="trace"
+      :status="status"
       :tools="tools"
       :findings="findings"
       :width="opsRailWidth"

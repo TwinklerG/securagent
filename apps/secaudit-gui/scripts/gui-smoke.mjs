@@ -66,6 +66,7 @@ const SELECTORS = {
   opsResizer: '[data-testid="ops-resizer"]',
   opsTabConfirm: '[data-testid="ops-tab-confirm"]',
   opsTabFindings: '[data-testid="ops-tab-findings"]',
+  opsTabStatus: '[data-testid="ops-tab-status"]',
   opsTabTools: '[data-testid="ops-tab-tools"]',
   opsTabTrace: '[data-testid="ops-tab-trace"]',
   sendButton: '[data-testid="send-button"]',
@@ -75,6 +76,10 @@ const SELECTORS = {
   sessionArchiveButton: '[data-testid="session-archive-button"]',
   sessionItem: '[data-testid="session-item"]',
   sessionList: '[data-testid="session-list"]',
+  statusPanel: '[data-testid="status-panel"]',
+  statusTokenCompletion: '[data-testid="status-token-completion"]',
+  statusTokenPrompt: '[data-testid="status-token-prompt"]',
+  statusTokenTotal: '[data-testid="status-token-total"]',
   toolConfirmCount: '[data-testid="tool-confirm-count"]',
   toolConfirmDeniedStatus: '[data-testid="tool-confirm-status-denied"]',
   toolConfirmDetail: '[data-testid="tool-confirm-detail"]',
@@ -218,7 +223,9 @@ async function checkTextContent() {
 async function checkOpsRailTabs() {
   const tabs = await evaluate(
     `(() => ({
-      traceActive: document.querySelector('${SELECTORS.opsTabTrace}')?.getAttribute("aria-pressed") === "true",
+      statusActive: document.querySelector('${SELECTORS.opsTabStatus}')?.getAttribute("aria-pressed") === "true",
+      statusVisible: Boolean(document.querySelector('${SELECTORS.statusPanel}')),
+      traceVisible: Boolean(document.querySelector('${SELECTORS.opsTabTrace}')),
       confirmVisible: Boolean(document.querySelector('${SELECTORS.opsTabConfirm}')),
       toolsVisible: Boolean(document.querySelector('${SELECTORS.opsTabTools}')),
       findingsVisible: Boolean(document.querySelector('${SELECTORS.opsTabFindings}')),
@@ -228,7 +235,9 @@ async function checkOpsRailTabs() {
   );
   addCheck(
     "右侧栏使用 tabs 并可调整宽度",
-    tabs.traceActive &&
+    tabs.statusActive &&
+      tabs.statusVisible &&
+      tabs.traceVisible &&
       tabs.confirmVisible &&
       tabs.toolsVisible &&
       tabs.findingsVisible &&
@@ -601,6 +610,7 @@ async function checkPreviewInteraction() {
     duringRun.liveDraftVisible && duringRun.sendDisabled && duringRun.workDirDisabled,
     duringRun,
   );
+  await checkLiveTokenUsageDuringRun();
   await checkTraceFiltersDuringRun();
   await waitForExpression(
     `document.body.innerText.includes("不会访问真实 API Key") && document.querySelector('${SELECTORS.sendButton}')?.disabled === true`,
@@ -642,6 +652,28 @@ async function checkPreviewInteraction() {
     "工作区切换后状态",
   );
   addCheck("预览模式可切换工作区输入", afterWorkDir.workDir.endsWith("crates"), afterWorkDir);
+}
+
+async function checkLiveTokenUsageDuringRun() {
+  await selectOpsTab(SELECTORS.opsTabStatus, SELECTORS.statusPanel, "切换状态 tab");
+  await waitForExpression(
+    `document.querySelector('${SELECTORS.statusTokenTotal}')?.innerText.includes("4,060")`,
+  );
+  const tokenUsage = await evaluate(
+    `(() => ({
+      total: document.querySelector('${SELECTORS.statusTokenTotal}')?.innerText ?? "",
+      prompt: document.querySelector('${SELECTORS.statusTokenPrompt}')?.innerText ?? "",
+      completion: document.querySelector('${SELECTORS.statusTokenCompletion}')?.innerText ?? "",
+    }))()`,
+    "实时 Token 用量状态",
+  );
+  addCheck(
+    "预览模式实时更新 Token 用量",
+    tokenUsage.total.includes("4,060") &&
+      tokenUsage.prompt.includes("2,800") &&
+      tokenUsage.completion.includes("1,260"),
+    tokenUsage,
+  );
 }
 
 async function checkTraceFiltersDuringRun() {

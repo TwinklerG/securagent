@@ -1,4 +1,5 @@
-use secaudit_agent::{ChatMessage, Role};
+use secaudit_agent::{ChatMessage, Role, TokenUsage};
+use secaudit_conversation::{ContextTokenEstimator, ContextUsage};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -9,6 +10,7 @@ pub(crate) struct AgentWorkbench {
     pub(crate) project: ProjectPanel,
     pub(crate) conversation: ConversationPanel,
     pub(crate) run: RunPanel,
+    pub(crate) status: StatusPanel,
     pub(crate) tools: Vec<ToolCapability>,
     pub(crate) trace: Vec<TraceEvent>,
     pub(crate) findings: Vec<FindingPreview>,
@@ -55,6 +57,96 @@ pub(crate) enum RunPhase {
     Ready,
     Running,
     Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub(crate) struct StatusPanel {
+    pub(crate) agent_label: String,
+    pub(crate) model: String,
+    pub(crate) session_status: String,
+    pub(crate) session_path: String,
+    pub(crate) context: GuiContextUsage,
+    pub(crate) active_context: GuiContextUsage,
+    pub(crate) token_usage: GuiTokenUsage,
+    pub(crate) message_count: usize,
+    pub(crate) trace_count: usize,
+    pub(crate) tool_count: usize,
+    pub(crate) finding_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub(crate) struct GuiContextUsage {
+    pub(crate) window_tokens: u64,
+    pub(crate) used_tokens: u64,
+    pub(crate) free_tokens: u64,
+    pub(crate) system_tokens: u64,
+    pub(crate) tool_tokens: u64,
+    pub(crate) message_tokens: u64,
+    pub(crate) used_percent: u64,
+    pub(crate) free_percent: u64,
+    pub(crate) system_percent: u64,
+    pub(crate) tool_percent: u64,
+    pub(crate) message_percent: u64,
+    pub(crate) estimator_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub(crate) struct GuiTokenUsage {
+    pub(crate) prompt: u64,
+    pub(crate) completion: u64,
+    pub(crate) total: u64,
+}
+
+impl GuiContextUsage {
+    #[must_use]
+    pub(crate) fn from_context_usage(usage: &ContextUsage) -> Self {
+        Self {
+            window_tokens: usage.window_tokens,
+            used_tokens: usage.used_tokens,
+            free_tokens: usage.free_tokens,
+            system_tokens: usage.system_tokens,
+            tool_tokens: usage.tool_tokens,
+            message_tokens: usage.message_tokens,
+            used_percent: usage.used_percent(),
+            free_percent: usage.free_percent(),
+            system_percent: usage.system_percent(),
+            tool_percent: usage.tool_percent(),
+            message_percent: usage.message_percent(),
+            estimator_label: context_estimator_label(usage.token_estimator).to_owned(),
+        }
+    }
+}
+
+impl GuiTokenUsage {
+    #[must_use]
+    pub(crate) fn from_token_usage(usage: TokenUsage) -> Self {
+        Self {
+            prompt: usage.prompt_tokens,
+            completion: usage.completion_tokens,
+            total: token_usage_total(usage),
+        }
+    }
+}
+
+fn context_estimator_label(estimator: ContextTokenEstimator) -> &'static str {
+    match estimator {
+        ContextTokenEstimator::Tiktoken => "tiktoken",
+        ContextTokenEstimator::CharacterApproximation => "字符估算",
+    }
+}
+
+fn token_usage_total(usage: TokenUsage) -> u64 {
+    if usage.total_tokens > 0 {
+        usage.total_tokens
+    } else {
+        usage.prompt_tokens.saturating_add(usage.completion_tokens)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -289,6 +381,7 @@ pub(crate) struct AgentEvent {
     pub(crate) trace: TraceEvent,
     pub(crate) approval_request: Option<CommandApprovalRequest>,
     pub(crate) approval_resolution: Option<CommandApprovalResolution>,
+    pub(crate) token_usage: Option<GuiTokenUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

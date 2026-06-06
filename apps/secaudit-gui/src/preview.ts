@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   AgentWorkbench,
+  GuiContextUsage,
   GuiMessage,
   ToolCapability,
   ToolParameter,
@@ -20,6 +21,13 @@ const PREVIEW_STORAGE_ROOT = "~/.secaudit";
 const PREVIEW_CONFIG_ERROR =
   "浏览器预览模式：真实 Agent 运行时读取 ~/.secaudit/config.json 或 SECAUDIT_API_KEY；可选配置为 SECAUDIT_API_BASE_URL、SECAUDIT_MODEL、SECAUDIT_MAX_ITERATIONS、SECAUDIT_STRATEGY。";
 const PREVIEW_DEFAULT_REQUEST = "审计当前仓库中可能的高风险代码路径";
+const PREVIEW_CONTEXT_WINDOW_TOKENS = 128_000;
+const PREVIEW_CONTEXT_USED_TOKENS = 1_420;
+const PREVIEW_CONTEXT_SYSTEM_TOKENS = 320;
+const PREVIEW_CONTEXT_TOOL_TOKENS = 260;
+const PREVIEW_CONTEXT_MESSAGE_TOKENS = 840;
+const PREVIEW_TOKEN_PROMPT_TOKENS = 2_480;
+const PREVIEW_TOKEN_COMPLETION_TOKENS = 1_120;
 const PREVIEW_READ_FILE_ARGS = {
   path: "src/views/PromptApp.vue",
   offset: 1,
@@ -146,6 +154,8 @@ export function createPreviewWorkbench(request?: string): AgentWorkbench {
   const userMessage = createUserMessage(request ?? PREVIEW_DEFAULT_REQUEST);
   const assistantMessage = createAssistantMessage();
   const messages = [userMessage, assistantMessage];
+  const trace = createPreviewTrace(traceNow);
+  const findings = createPreviewFindings();
 
   return {
     project: {
@@ -170,9 +180,26 @@ export function createPreviewWorkbench(request?: string): AgentWorkbench {
       pendingLabel: "预览运行中",
       pendingDetail: "浏览器预览正在生成模拟响应。",
     },
+    status: {
+      agentLabel: "预览",
+      model: "gpt-4o",
+      sessionStatus: "active",
+      sessionPath: `${PREVIEW_STORAGE_ROOT}/projects/preview/sessions/active/${PREVIEW_SESSION_ID}.json`,
+      context: createPreviewContextUsage(),
+      activeContext: createPreviewContextUsage(),
+      tokenUsage: {
+        prompt: PREVIEW_TOKEN_PROMPT_TOKENS,
+        completion: PREVIEW_TOKEN_COMPLETION_TOKENS,
+        total: PREVIEW_TOKEN_PROMPT_TOKENS + PREVIEW_TOKEN_COMPLETION_TOKENS,
+      },
+      messageCount: messages.length,
+      traceCount: trace.length,
+      toolCount: PREVIEW_TOOLS.length,
+      findingCount: findings.length,
+    },
     tools: PREVIEW_TOOLS,
-    trace: createPreviewTrace(traceNow),
-    findings: createPreviewFindings(),
+    trace,
+    findings,
   };
 }
 
@@ -220,6 +247,13 @@ export function createPreviewAgentEvents(request: string): Array<AgentEvent> {
     createPreviewAgentEvent("token", "流式输出", "我会先识别入口、"),
     createPreviewAgentEvent("token", "流式输出", "权限边界和外部输入，"),
     createPreviewAgentEvent("tool_result", "read_file", "已返回预览模式下的模拟文件摘要。"),
+    createPreviewAgentEvent("token", "Token 用量", "", {
+      tokenUsage: {
+        prompt: 320,
+        completion: 140,
+        total: 460,
+      },
+    }),
     createPreviewAgentEvent(
       "tool_confirm",
       "工具确认请求",
@@ -258,6 +292,28 @@ function createUserMessage(content: string): GuiMessage {
 
 function createAssistantMessage(): GuiMessage {
   return { role: "assistant", content: PREVIEW_RESPONSE };
+}
+
+function createPreviewContextUsage(): GuiContextUsage {
+  const freeTokens = PREVIEW_CONTEXT_WINDOW_TOKENS - PREVIEW_CONTEXT_USED_TOKENS;
+  return {
+    windowTokens: PREVIEW_CONTEXT_WINDOW_TOKENS,
+    usedTokens: PREVIEW_CONTEXT_USED_TOKENS,
+    freeTokens,
+    systemTokens: PREVIEW_CONTEXT_SYSTEM_TOKENS,
+    toolTokens: PREVIEW_CONTEXT_TOOL_TOKENS,
+    messageTokens: PREVIEW_CONTEXT_MESSAGE_TOKENS,
+    usedPercent: percent(PREVIEW_CONTEXT_USED_TOKENS, PREVIEW_CONTEXT_WINDOW_TOKENS),
+    freePercent: percent(freeTokens, PREVIEW_CONTEXT_WINDOW_TOKENS),
+    systemPercent: percent(PREVIEW_CONTEXT_SYSTEM_TOKENS, PREVIEW_CONTEXT_WINDOW_TOKENS),
+    toolPercent: percent(PREVIEW_CONTEXT_TOOL_TOKENS, PREVIEW_CONTEXT_WINDOW_TOKENS),
+    messagePercent: percent(PREVIEW_CONTEXT_MESSAGE_TOKENS, PREVIEW_CONTEXT_WINDOW_TOKENS),
+    estimatorLabel: "tiktoken",
+  };
+}
+
+function percent(value: number, total: number): number {
+  return Math.floor((value * 100) / total);
 }
 
 function createPreviewSessions(
@@ -350,7 +406,7 @@ function createPreviewAgentEvent(
   kind: TraceEvent["kind"],
   title: string,
   detail: string,
-  options: Partial<Pick<AgentEvent, "approvalRequest" | "approvalResolution">> = {},
+  options: Partial<Pick<AgentEvent, "approvalRequest" | "approvalResolution" | "tokenUsage">> = {},
 ): AgentEvent {
   const trace = createTraceEvent(nextPreviewTraceId, kind, title, detail);
   nextPreviewTraceId += 1;
@@ -358,6 +414,7 @@ function createPreviewAgentEvent(
     trace,
     approvalRequest: options.approvalRequest ?? null,
     approvalResolution: options.approvalResolution ?? null,
+    tokenUsage: options.tokenUsage ?? null,
   };
 }
 

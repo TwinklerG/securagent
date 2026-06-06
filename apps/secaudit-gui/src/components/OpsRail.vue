@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  Activity,
   ChevronDown,
   ChevronRight,
   ClipboardCopy,
@@ -11,11 +12,19 @@ import {
 } from "lucide-vue-next";
 import { computed, nextTick, ref, watch } from "vue";
 import { OPS_RAIL_MAX_WIDTH, OPS_RAIL_MIN_WIDTH } from "../constants";
-import type { FindingPreview, ToolCapability, ToolParameter, TraceEvent } from "../types";
+import type {
+  FindingPreview,
+  GuiContextUsage,
+  StatusPanel,
+  ToolCapability,
+  ToolParameter,
+  TraceEvent,
+} from "../types";
 import { formatTraceTimeLabel } from "../utils/time";
 
 const props = defineProps<{
   trace: Array<TraceEvent>;
+  status: StatusPanel | null;
   tools: Array<ToolCapability>;
   findings: Array<FindingPreview>;
   width: number;
@@ -26,15 +35,26 @@ const emit = defineEmits<{
 }>();
 
 const traceViewport = ref<HTMLElement | null>(null);
-const activeTab = ref<OpsTabId>("trace");
+const activeTab = ref<OpsTabId>("status");
 const activeTraceFilter = ref<TraceFilterId>("all");
 const expandedTraceIds = ref<Set<number>>(new Set());
 const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-type OpsTabId = "trace" | "confirm" | "tools" | "findings";
+type OpsTabId = "status" | "trace" | "confirm" | "tools" | "findings";
 type TraceFilterId = "all" | "state" | "tool" | "error";
+type StatusMetric = {
+  label: string;
+  value: string;
+  tone: string;
+};
+type ContextBreakdownItem = {
+  label: string;
+  tokens: number;
+  percent: number;
+  className: string;
+};
 type ToolRiskSummary = {
   label: string;
   count: number;
@@ -119,6 +139,18 @@ const TOOL_CONFIRM_STATUS_CLASS_BY_ID: Record<ToolConfirmStatusId, string> = {
 };
 const TOOL_CONFIRM_STATUS_BADGE_BASE =
   "inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] font-black";
+const STATUS_AGENT_BADGE_BASE =
+  "inline-flex items-center rounded-full border px-2 py-1 text-[11px] font-black";
+const STATUS_CONTEXT_SEGMENT_CLASSES = {
+  system: "bg-[#5d6d7d]",
+  tool: "bg-[#2f765e]",
+  message: "bg-[#c6562f]",
+  free: "bg-[#d8d0bf]",
+};
+const STATUS_SESSION_LABEL_BY_VALUE: Record<string, string> = {
+  active: "活跃",
+  archived: "归档",
+};
 const TOOL_CONFIRM_WAITING_DETAILS = [
   "等待你在主确认弹窗中批准或拒绝。右侧确认页会保留历史记录。",
   "等待用户确认。",
@@ -173,7 +205,68 @@ const filteredTrace = computed(() => {
 
 const toolGroups = computed<Array<ToolGroup>>(() => groupToolsByCategory(props.tools));
 const toolConfirmEvents = computed(() => mergeToolConfirmEvents(props.trace));
+const statusContext = computed(() => props.status?.activeContext ?? props.status?.context ?? null);
+const statusMetrics = computed<Array<StatusMetric>>(() => [
+  {
+    label: "消息",
+    value: formatCount(props.status?.messageCount ?? 0),
+    tone: "text-[#20291f]",
+  },
+  {
+    label: "轨迹",
+    value: formatCount(props.trace.length),
+    tone: "text-[#5d6d7d]",
+  },
+  {
+    label: "工具",
+    value: formatCount(props.tools.length),
+    tone: "text-[#2f765e]",
+  },
+  {
+    label: "发现",
+    value: formatCount(props.findings.length),
+    tone: "text-[#9b2d25]",
+  },
+]);
+const contextBreakdown = computed<Array<ContextBreakdownItem>>(() => {
+  const context = statusContext.value;
+  if (!context) {
+    return [];
+  }
+  return [
+    {
+      label: "系统",
+      tokens: context.systemTokens,
+      percent: context.systemPercent,
+      className: STATUS_CONTEXT_SEGMENT_CLASSES.system,
+    },
+    {
+      label: "工具",
+      tokens: context.toolTokens,
+      percent: context.toolPercent,
+      className: STATUS_CONTEXT_SEGMENT_CLASSES.tool,
+    },
+    {
+      label: "消息",
+      tokens: context.messageTokens,
+      percent: context.messagePercent,
+      className: STATUS_CONTEXT_SEGMENT_CLASSES.message,
+    },
+    {
+      label: "剩余",
+      tokens: context.freeTokens,
+      percent: context.freePercent,
+      className: STATUS_CONTEXT_SEGMENT_CLASSES.free,
+    },
+  ];
+});
 const tabItems = computed(() => [
+  {
+    id: "status" as const,
+    label: "状态",
+    count: statusContext.value ? percentLabel(statusContext.value.usedPercent) : "-",
+    icon: Activity,
+  },
   { id: "trace" as const, label: "轨迹", count: props.trace.length, icon: History },
   { id: "confirm" as const, label: "确认", count: toolConfirmEvents.value.length, icon: ShieldAlert },
   { id: "tools" as const, label: "工具", count: props.tools.length, icon: Wrench },
@@ -217,6 +310,45 @@ function selectTraceFilter(id: TraceFilterId) {
 
 function selectTab(id: OpsTabId) {
   activeTab.value = id;
+}
+
+function formatCount(value: number): string {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatTokens(value: number): string {
+  return `${formatCount(value)} tokens`;
+}
+
+function percentLabel(value: number): string {
+  return `${clampedPercent(value)}%`;
+}
+
+function clampedPercent(value: number): number {
+  return Math.min(Math.max(Math.round(value), 0), 100);
+}
+
+function contextBarStyle(context: GuiContextUsage | null): Record<string, string> {
+  return { width: `${clampedPercent(context?.usedPercent ?? 0)}%` };
+}
+
+function contextSegmentStyle(percent: number): Record<string, string> {
+  return { width: `${clampedPercent(percent)}%` };
+}
+
+function agentBadgeClass(): string {
+  const label = props.status?.agentLabel ?? "";
+  if (label.includes("运行")) {
+    return `${STATUS_AGENT_BADGE_BASE} border-[#e1c27c] bg-[#fff1d5] text-[#805100]`;
+  }
+  if (label.includes("就绪")) {
+    return `${STATUS_AGENT_BADGE_BASE} border-[#b8cec1] bg-[#e5efe7] text-[#2f765e]`;
+  }
+  return `${STATUS_AGENT_BADGE_BASE} border-[#d8847b] bg-[#fff1ee] text-[#9b2d25]`;
+}
+
+function sessionStatusLabel(status: string): string {
+  return STATUS_SESSION_LABEL_BY_VALUE[status] ?? status;
 }
 
 function beginResize(event: PointerEvent) {
@@ -534,7 +666,7 @@ function findingStatusClass(status: FindingPreview["status"]): string {
       @pointerdown="beginResize"
     />
 
-    <nav class="grid grid-cols-4 gap-1.5 border-b border-[rgba(39,48,40,0.14)] p-[14px] pb-3">
+    <nav class="grid grid-cols-5 gap-1.5 border-b border-[rgba(39,48,40,0.14)] p-[14px] pb-3">
       <button
         v-for="tab in tabItems"
         :key="tab.id"
@@ -555,7 +687,130 @@ function findingStatusClass(status: FindingPreview["status"]): string {
       </button>
     </nav>
 
-    <section v-if="activeTab === 'trace'" class="flex min-h-0 flex-1 flex-col p-[18px] pt-4">
+    <section v-if="activeTab === 'status'" class="flex min-h-0 flex-1 flex-col p-[18px] pt-4">
+      <div class="mb-3 flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="flex min-w-0 items-center gap-2 text-[13px] font-black text-[#334235]">
+            <Activity :size="17" />
+            <span>运行状态</span>
+          </div>
+          <p class="mt-1 truncate text-xs font-bold text-[#667166]">
+            {{ status?.model ?? "未配置" }}
+          </p>
+        </div>
+        <span :class="agentBadgeClass()" data-testid="agent-status">
+          {{ status?.agentLabel ?? "初始化" }}
+        </span>
+      </div>
+
+      <div
+        class="mb-3 grid grid-cols-4 gap-1.5 rounded-lg border border-[rgba(39,48,40,0.12)] bg-[rgba(255,252,244,0.66)] p-2 text-center"
+        data-testid="status-metrics"
+      >
+        <span
+          v-for="metric in statusMetrics"
+          :key="metric.label"
+          class="grid gap-0.5 text-[11px] font-bold text-[#667166]"
+        >
+          <strong class="text-sm font-black tabular-nums" :class="metric.tone">
+            {{ metric.value }}
+          </strong>
+          {{ metric.label }}
+        </span>
+      </div>
+
+      <div
+        v-if="status && statusContext"
+        class="grid min-h-0 flex-1 content-start gap-3 overflow-auto pr-1"
+        data-testid="status-panel"
+      >
+        <section class="rounded-lg border border-[rgba(39,48,40,0.13)] bg-[rgba(255,252,244,0.72)] p-3">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <strong class="text-xs font-black text-[#20291f]">上下文窗口</strong>
+            <span class="text-[11px] font-black text-[#667166]">
+              {{ statusContext.estimatorLabel }}
+            </span>
+          </div>
+          <div class="flex items-end justify-between gap-2">
+            <span class="text-2xl font-black text-[#20291f] tabular-nums">
+              {{ percentLabel(statusContext.usedPercent) }}
+            </span>
+            <span class="pb-1 text-[11px] font-bold text-[#667166]">
+              {{ formatTokens(statusContext.usedTokens) }} / {{ formatTokens(statusContext.windowTokens) }}
+            </span>
+          </div>
+          <div class="mt-3 h-2.5 overflow-hidden rounded-full bg-[#e4ddcf]">
+            <div class="h-full rounded-full bg-[#2f765e]" :style="contextBarStyle(statusContext)" />
+          </div>
+          <div class="mt-2 flex h-2 overflow-hidden rounded-full bg-[#e4ddcf]" data-testid="context-breakdown-bar">
+            <div
+              v-for="item in contextBreakdown"
+              :key="item.label"
+              class="h-full"
+              :class="item.className"
+              :style="contextSegmentStyle(item.percent)"
+            />
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-1.5">
+            <div
+              v-for="item in contextBreakdown"
+              :key="`context-${item.label}`"
+              class="rounded-md border border-[rgba(39,48,40,0.08)] bg-[rgba(255,253,247,0.58)] px-2 py-1.5"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-black text-[#4c584d]">{{ item.label }}</span>
+                <span class="text-[11px] font-black text-[#667166]">{{ percentLabel(item.percent) }}</span>
+              </div>
+              <p class="mt-0.5 text-xs font-black text-[#20291f] tabular-nums">
+                {{ formatTokens(item.tokens) }}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="rounded-lg border border-[rgba(39,48,40,0.13)] bg-[rgba(255,252,244,0.72)] p-3">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <strong class="text-xs font-black text-[#20291f]">累计 Token</strong>
+            <span class="text-[11px] font-black text-[#667166]" data-testid="status-token-total">
+              {{ formatTokens(status.tokenUsage.total) }}
+            </span>
+          </div>
+          <div class="grid grid-cols-2 gap-1.5">
+            <span class="rounded-md bg-[rgba(233,226,212,0.62)] px-2 py-1.5">
+              <span class="block text-[11px] font-black text-[#667166]">Prompt</span>
+              <strong class="mt-0.5 block text-xs font-black text-[#20291f] tabular-nums" data-testid="status-token-prompt">
+                {{ formatTokens(status.tokenUsage.prompt) }}
+              </strong>
+            </span>
+            <span class="rounded-md bg-[rgba(233,226,212,0.62)] px-2 py-1.5">
+              <span class="block text-[11px] font-black text-[#667166]">Completion</span>
+              <strong class="mt-0.5 block text-xs font-black text-[#20291f] tabular-nums" data-testid="status-token-completion">
+                {{ formatTokens(status.tokenUsage.completion) }}
+              </strong>
+            </span>
+          </div>
+        </section>
+
+        <section class="grid gap-1.5 rounded-lg border border-[rgba(39,48,40,0.13)] bg-[rgba(255,252,244,0.72)] p-3">
+          <div class="grid grid-cols-[68px_minmax(0,1fr)] gap-2 text-xs leading-[1.45]">
+            <span class="font-black text-[#667166]">会话</span>
+            <span class="min-w-0 text-[#26382d] [overflow-wrap:anywhere]">
+              {{ sessionStatusLabel(status.sessionStatus) }}
+            </span>
+          </div>
+          <div class="grid grid-cols-[68px_minmax(0,1fr)] gap-2 text-xs leading-[1.45]">
+            <span class="font-black text-[#667166]">路径</span>
+            <span class="min-w-0 text-[#26382d] [overflow-wrap:anywhere]">
+              {{ status.sessionPath }}
+            </span>
+          </div>
+        </section>
+      </div>
+
+      <p v-else class="text-xs text-[#667166]">状态快照尚未加载</p>
+    </section>
+
+    <section v-else-if="activeTab === 'trace'" class="flex min-h-0 flex-1 flex-col p-[18px] pt-4">
       <div class="mb-2.5 flex items-center justify-between gap-2">
         <div class="flex min-w-0 items-center gap-2 text-[13px] font-black text-[#334235]">
           <History :size="17" />
