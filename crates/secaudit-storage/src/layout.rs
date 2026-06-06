@@ -14,6 +14,8 @@ use crate::lock::FileLock;
 
 /// 用户级运行时数据目录名。
 pub const RUNTIME_DIR: &str = ".secaudit";
+/// 项目日志目录
+pub const LOGS_DIR: &str = "logs";
 /// 项目子目录名。
 pub const PROJECTS_DIR: &str = "projects";
 /// 项目元数据文件名。

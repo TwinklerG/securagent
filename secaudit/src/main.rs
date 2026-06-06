@@ -21,6 +21,10 @@ use colored::Colorize;
 use secaudit_agent::strategy;
 use secaudit_agent::{Agent, to_multi_turn_sample};
 use secaudit_core::Config;
+use secaudit_storage::LOGS_DIR;
+use secaudit_storage::RUNTIME_DIR;
+use tracing_appender::non_blocking;
+use tracing_appender::rolling::hourly;
 
 use crate::headless::{
     HeadlessResponse, HeadlessResponseContext, SessionSnapshot, TraceRecorder, TurnRecord,
@@ -138,8 +142,14 @@ enum ConfirmMode {
 
 #[tokio::main]
 async fn main() {
+    let file_appender = hourly(
+        Config::default_log_path().unwrap_or(PathBuf::from(RUNTIME_DIR).join(LOGS_DIR)),
+        "secaudit-tui.log",
+    );
+    let (non_blocking, _guard) = non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(non_blocking)
         .init();
 
     let cli = Cli::parse();

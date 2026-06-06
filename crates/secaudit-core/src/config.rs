@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use secaudit_storage::LOGS_DIR;
 use secaudit_storage::RUNTIME_DIR;
 
 use crate::error::Error;
@@ -123,6 +124,12 @@ impl Config {
     #[must_use]
     pub fn default_config_path() -> Option<PathBuf> {
         dirs::home_dir().map(|home_dir| home_dir.join(RUNTIME_DIR).join(CONFIG_FILE))
+    }
+
+    /// 默认日志目录路径
+    #[must_use]
+    pub fn default_log_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|home_dir| home_dir.join(RUNTIME_DIR).join(LOGS_DIR))
     }
 
     #[must_use]

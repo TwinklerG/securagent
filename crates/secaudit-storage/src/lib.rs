@@ -11,7 +11,8 @@ mod lock;
 
 pub use error::{Error, Result};
 pub use layout::{
-    ACTIVE_DIR, ARCHIVED_DIR, INDEX_FILE, MEMORY_DIR, PROJECT_FILE, PROJECTS_DIR, RUNTIME_DIR,
-    RuntimeLayout, SESSIONS_DIR, SKILLS_DIR, TOOL_CONFIG_DIR, atomic_tmp_path, canonical_work_dir,
+    ACTIVE_DIR, ARCHIVED_DIR, INDEX_FILE, LOGS_DIR, MEMORY_DIR, PROJECT_FILE, PROJECTS_DIR,
+    RUNTIME_DIR, RuntimeLayout, SESSIONS_DIR, SKILLS_DIR, TOOL_CONFIG_DIR, atomic_tmp_path,
+    canonical_work_dir,
 };
 pub use lock::FileLock;

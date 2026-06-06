@@ -20,6 +20,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
+tracing-appender.workspace = true
+secaudit-storage = { path = "../crates/secaudit-storage" }
 
 [dev-dependencies]
 tempfile = "3"
