@@ -20,9 +20,9 @@ build-debug:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# 运行测试
+# 运行整个 workspace 的测试
 test:
-    cargo test
+    cargo test --workspace --all-targets
 
 # 格式化代码
 fmt:

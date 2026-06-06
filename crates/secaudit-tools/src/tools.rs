@@ -1,12 +1,13 @@
 mod dependency_checker;
 mod execute_command;
+mod file_probe;
 mod find_files;
 mod list_directory;
 mod nvd_lookup;
 mod read_file;
+mod sandbox;
 mod search_content;
 mod semgrep_scanner;
-pub(crate) mod shared;
 mod write_file;
 
 use std::borrow::Cow;

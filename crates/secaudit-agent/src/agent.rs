@@ -1,5 +1,6 @@
 // Agent 模块：ReAct 循环与审计流程编排
 
+pub mod events;
 pub mod executor;
 pub(crate) mod skill_tool;
 pub mod state;
@@ -15,6 +16,7 @@ use crate::prompt;
 use crate::session::Session;
 use crate::tools;
 use crate::tools::{ConfirmFn, Tool};
+use events::EventBus;
 use executor::{ReActExecutor, StepResult, tool_definitions_from_tools};
 use state::AgentState;
 
@@ -53,80 +55,6 @@ pub struct AuditReport {
     /// 完整对话历史（用于 trajectory 导出，不参与序列化）
     #[serde(skip)]
     pub messages: Vec<ChatMessage>,
-}
-
-/// 状态变更回调
-pub type StateCallback = Box<dyn Fn(&AgentState) + Send + Sync>;
-/// 思考过程回调
-pub type ThinkCallback = Box<dyn Fn(&str) + Send + Sync>;
-/// 流式 token 增量回调（每次仅传当前 chunk 的文本片段）
-pub type TokenCallback = Box<dyn Fn(&str) + Send + Sync>;
-pub type UsageCallback = Box<dyn Fn(TokenUsage) + Send + Sync>;
-/// 工具调用回调（工具名, 参数）
-pub type ToolCallCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
-/// 工具结果回调（工具名, 结果）
-pub type ToolResultCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
-
-/// 事件总线：管理 Agent 状态与回调，独立于 LLM/工具借用。
-pub(crate) struct EventBus {
-    /// 当前运行状态
-    state: AgentState,
-    /// 状态变更回调
-    on_state_change: Option<StateCallback>,
-    /// 思考过程回调
-    on_think: Option<ThinkCallback>,
-    /// 流式 token 增量回调
-    on_token: Option<TokenCallback>,
-    /// 真实 token usage 回调
-    on_usage: Option<UsageCallback>,
-    /// 工具调用回调
-    on_tool_call: Option<ToolCallCallback>,
-    /// 工具结果回调
-    on_tool_result: Option<ToolResultCallback>,
-}
-
-impl EventBus {
-    /// 更新状态并触发回调
-    pub(crate) fn set_state(&mut self, state: AgentState) {
-        self.state = state;
-        if let Some(cb) = &self.on_state_change {
-            cb(&self.state);
-        }
-    }
-
-    /// 通知思考内容
-    pub(crate) fn notify_think(&self, text: &str) {
-        if let Some(cb) = &self.on_think {
-            cb(text);
-        }
-    }
-
-    /// 通知流式 token 增量
-    pub(crate) fn notify_token(&self, delta: &str) {
-        if let Some(cb) = &self.on_token {
-            cb(delta);
-        }
-    }
-
-    pub(crate) fn notify_usage(&self, usage: TokenUsage) {
-        if let Some(cb) = &self.on_usage {
-            cb(usage);
-        }
-    }
-
-    /// 通知工具调用
-    pub(crate) fn notify_tool_call(&self, name: &str, args: &str) {
-        if let Some(cb) = &self.on_tool_call {
-            cb(name, args);
-        }
-    }
-
-    /// 通知工具结果
-    pub(crate) fn notify_tool_result(&self, name: &str, result: &str) {
-        if let Some(cb) = &self.on_tool_result {
-            cb(name, result);
-        }
-    }
 }
 
 /// 安全代码审计 Agent
@@ -192,15 +120,9 @@ impl Agent {
                         "阶段预期文本输出，但收到了工具调用，已自动执行并继续"
                     );
 
-                    for call in &calls {
-                        self.events
-                            .notify_tool_call(&call.function.name, &call.function.arguments);
-                    }
-
+                    self.events.notify_tool_calls(&calls);
                     let results = executor.execute_tool_calls(&calls).await?;
-                    for (name, result) in &results {
-                        self.events.notify_tool_result(name, result);
-                    }
+                    self.events.notify_tool_results(&results);
 
                     if tool_rounds >= max_tool_rounds {
                         return Err(Error::Llm(format!(
@@ -237,15 +159,7 @@ impl Agent {
             config,
             llm,
             tools,
-            events: EventBus {
-                state: AgentState::Init,
-                on_state_change: None,
-                on_think: None,
-                on_token: None,
-                on_usage: None,
-                on_tool_call: None,
-                on_tool_result: None,
-            },
+            events: EventBus::default(),
             skill_registry,
             work_dir,
         }
@@ -259,12 +173,12 @@ impl Agent {
 
     /// 设置状态变更回调
     pub fn on_state_change<F: Fn(&AgentState) + Send + Sync + 'static>(&mut self, cb: F) {
-        self.events.on_state_change = Some(Box::new(cb));
+        self.events.on_state_change(cb);
     }
 
     /// 设置思考过程回调
     pub fn on_think<F: Fn(&str) + Send + Sync + 'static>(&mut self, cb: F) {
-        self.events.on_think = Some(Box::new(cb));
+        self.events.on_think(cb);
     }
 
     /// 设置流式 token 增量回调。
@@ -272,21 +186,21 @@ impl Agent {
     /// 注册后，Agent 在调用 LLM 时会启用流式响应，每收到一个文本片段就调用 `cb`。
     /// 适合 TUI/前端实时打字机式渲染。
     pub fn on_token<F: Fn(&str) + Send + Sync + 'static>(&mut self, cb: F) {
-        self.events.on_token = Some(Box::new(cb));
+        self.events.on_token(cb);
     }
 
     pub fn on_usage<F: Fn(TokenUsage) + Send + Sync + 'static>(&mut self, cb: F) {
-        self.events.on_usage = Some(Box::new(cb));
+        self.events.on_usage(cb);
     }
 
     /// 设置工具调用回调
     pub fn on_tool_call<F: Fn(&str, &str) + Send + Sync + 'static>(&mut self, cb: F) {
-        self.events.on_tool_call = Some(Box::new(cb));
+        self.events.on_tool_call(cb);
     }
 
     /// 设置工具结果回调
     pub fn on_tool_result<F: Fn(&str, &str) + Send + Sync + 'static>(&mut self, cb: F) {
-        self.events.on_tool_result = Some(Box::new(cb));
+        self.events.on_tool_result(cb);
     }
 
     /// 获取可用工具名称列表
@@ -389,14 +303,9 @@ impl Agent {
                 StepResult::ToolCalls(calls) => {
                     debug!("第 {iteration} 轮工具调用：{calls:?}");
                     empty_rounds = 0;
-                    for call in &calls {
-                        self.events
-                            .notify_tool_call(&call.function.name, &call.function.arguments);
-                    }
+                    self.events.notify_tool_calls(&calls);
                     let results = executor.execute_tool_calls(&calls).await?;
-                    for (name, result) in &results {
-                        self.events.notify_tool_result(name, result);
-                    }
+                    self.events.notify_tool_results(&results);
                     self.events.set_state(AgentState::Analyzing);
                 }
                 StepResult::TextResponse(text) => {

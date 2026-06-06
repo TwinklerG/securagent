@@ -10,7 +10,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use super::shared::{canonicalize_work_dir, is_binary, resolve_search_dir};
+use super::file_probe::is_binary;
+use super::sandbox::{canonicalize_work_dir, resolve_search_dir};
 use crate::error::Error;
 use crate::tools::Tool;
 

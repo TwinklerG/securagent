@@ -1,7 +1,8 @@
 // LLM 模块：重导出 secaudit-llm 统一类型，提供 secaudit 专用的客户端构造
 
 pub use secaudit_llm::{
-    ChatMessage, HttpLlmClient, LlmConfig, Role, TokenUsage, ToolCallResponse, ToolDefinition,
+    ChatMessage, FunctionCall, HttpLlmClient, LlmConfig, Role, TokenUsage, ToolCallResponse,
+    ToolDefinition,
 };
 
 use crate::config::Config;

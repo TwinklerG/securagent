@@ -5,9 +5,10 @@ use std::fmt::{self, Display};
 use serde::Serialize;
 
 /// Agent 运行状态
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub enum AgentState {
     /// 初始化：加载配置和工具
+    #[default]
     Init,
     /// 规划中：分析代码，制定审计计划
     Planning,

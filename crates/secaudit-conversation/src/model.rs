@@ -41,10 +41,10 @@ impl Display for ProjectKey {
 }
 
 fn encode_project_key_char(ch: char) -> char {
-    match ch {
-        '/' | '\\' | ':' | ' ' => '-',
-        ch if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') => ch,
-        _ => '-',
+    if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+        ch
+    } else {
+        '-'
     }
 }
 
@@ -216,6 +216,17 @@ pub enum SessionPreviewRole {
     Assistant,
 }
 
+impl SessionPreviewRole {
+    /// 面向终端/UI 的短标签。
+    #[must_use]
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+        }
+    }
+}
+
 /// 会话列表预览。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPreview {
@@ -228,6 +239,16 @@ pub struct SessionPreview {
 impl SessionPreview {
     pub(crate) fn from_messages(messages: &[ChatMessage]) -> Option<Self> {
         messages.iter().rev().find_map(Self::from_message)
+    }
+
+    /// 格式化为入口层可直接展示的单行文本。
+    #[must_use]
+    pub fn display_text(&self, max_chars: usize) -> String {
+        format!(
+            "{}: {}",
+            self.role.display_label(),
+            truncate_chars(&self.content, max_chars)
+        )
     }
 
     fn from_message(message: &ChatMessage) -> Option<Self> {
@@ -259,6 +280,15 @@ impl SessionListItem {
             metadata: SessionMetadata::from_stored_session(session),
             preview: SessionPreview::from_messages(&session.messages),
         }
+    }
+
+    /// 面向入口层的会话预览文本。
+    #[must_use]
+    pub fn preview_text(&self, max_chars: usize) -> String {
+        self.preview.as_ref().map_or_else(
+            || "无用户/助手消息".to_owned(),
+            |preview| preview.display_text(max_chars),
+        )
     }
 }
 
@@ -306,6 +336,66 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 
     let truncated = text.chars().take(max_chars).collect::<String>();
     format!("{truncated}{ELLIPSIS}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use secaudit_agent::ChatMessage;
+
+    use super::{
+        ProjectKey, SCHEMA_VERSION, SessionListItem, SessionPreviewRole, SessionStatus,
+        StoredSession,
+    };
+
+    fn stored_with_messages(messages: Vec<ChatMessage>) -> StoredSession {
+        StoredSession {
+            schema_version: SCHEMA_VERSION,
+            id: "session-1".to_owned(),
+            project_key: ProjectKey::from_path(Path::new("/tmp/project")),
+            created_at: "2026-05-22T00:00:00Z".to_owned(),
+            updated_at: "2026-05-22T00:00:00Z".to_owned(),
+            status: SessionStatus::Active,
+            title: "未命名会话".to_owned(),
+            work_dir: PathBuf::from("/tmp/project"),
+            messages,
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn list_item_preview_prefers_latest_user_or_assistant_message() {
+        let item = SessionListItem::from_stored_session(&stored_with_messages(vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hello"),
+            ChatMessage::tool_result("call-1", "tool"),
+            ChatMessage::user("latest\nmessage"),
+        ]));
+
+        assert!(matches!(
+            item.preview.as_ref(),
+            Some(preview)
+                if preview.role == SessionPreviewRole::User
+                    && preview.content == "latest message"
+        ));
+        assert_eq!(item.preview_text(80), "User: latest message");
+    }
+
+    #[test]
+    fn list_item_preview_text_has_empty_fallback_and_truncation() {
+        let empty = SessionListItem::from_stored_session(&stored_with_messages(vec![
+            ChatMessage::system("sys"),
+            ChatMessage::tool_result("call-1", "tool"),
+        ]));
+        let long =
+            SessionListItem::from_stored_session(&stored_with_messages(vec![ChatMessage::user(
+                "abcdef",
+            )]));
+
+        assert_eq!(empty.preview_text(80), "无用户/助手消息");
+        assert_eq!(long.preview_text(3), "User: abc...");
+    }
 }
 
 impl ManagedSession {

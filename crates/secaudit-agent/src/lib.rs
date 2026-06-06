@@ -21,6 +21,8 @@ pub mod tools {
 pub use agent::state;
 pub use agent::strategy;
 pub use agent::{Agent, AuditReport, Finding};
-pub use llm::{ChatMessage, HttpLlmClient, Role, TokenUsage, ToolCallResponse, ToolDefinition};
+pub use llm::{
+    ChatMessage, FunctionCall, HttpLlmClient, Role, TokenUsage, ToolCallResponse, ToolDefinition,
+};
 pub use session::Session;
 pub use trajectory::to_multi_turn_sample;

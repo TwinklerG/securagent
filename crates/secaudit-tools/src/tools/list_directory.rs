@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use super::shared::resolve_sandbox_path;
+use super::sandbox::resolve_existing_path;
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -208,7 +208,7 @@ impl Tool for ListDirectory {
             .ok_or_else(|| Error::Tool(MSG_MISSING_PATH.into()))?;
 
         // 沙箱路径校验
-        let resolved = resolve_sandbox_path(&self.work_dir, path_str)?;
+        let resolved = resolve_existing_path(&self.work_dir, path_str)?;
 
         if !resolved.is_dir() {
             return Err(Error::Tool(format!("路径不是目录：{}", resolved.display())));

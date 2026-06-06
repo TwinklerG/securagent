@@ -1,5 +1,7 @@
 //! 命令执行工具 — 在工作目录中安全执行 shell 命令，支持白名单放行与用户确认。
 
+mod policy;
+
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -11,6 +13,8 @@ use tokio::time::timeout;
 
 use crate::error::Error;
 use crate::tools::{ConfirmFn, Tool};
+
+use self::policy::{CommandDecision, CommandPolicy};
 
 // —— 工具元信息 ——
 
@@ -37,45 +41,6 @@ const MAX_OUTPUT_LEN: usize = 10_000;
 const SHELL: &str = "sh";
 const SHELL_FLAG: &str = "-c";
 
-// —— 安全白名单（自动放行） ——
-
-const SAFE_COMMANDS: &[&str] = &[
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "grep",
-    "find",
-    "file",
-    "wc",
-    "tree",
-    "git log",
-    "git diff",
-    "git show",
-    "git status",
-    "cargo check",
-    "cargo clippy",
-    "cargo audit",
-    "npm audit",
-    "python -m py_compile",
-    "semgrep",
-    "rg",
-    "fd",
-];
-
-// —— 危险黑名单（一律禁止） ——
-
-const BLOCKED_COMMANDS: &[&str] = &[
-    "rm -rf /",
-    "mkfs",
-    "dd",
-    "shutdown",
-    "reboot",
-    "poweroff",
-    "halt",
-    ":(){:|:&};:",
-];
-
 // —— 提示消息 ——
 
 const MSG_MISSING_COMMAND: &str = "缺少 command 参数";
@@ -97,53 +62,6 @@ impl ExecuteCommand {
     pub fn new(work_dir: PathBuf, confirm: ConfirmFn) -> Self {
         Self { work_dir, confirm }
     }
-}
-
-/// 提取命令前缀，用于白名单/黑名单匹配。
-///
-/// 返回 (单词前缀, 双词前缀)，例如 `"git log --oneline"` → `("git", "git log")`。
-fn extract_command_prefix(command: &str) -> (&str, Option<&str>) {
-    let trimmed = command.trim();
-    let mut parts = trimmed.split_whitespace();
-
-    let first = parts.next().unwrap_or_default();
-    let two_word = parts.next().map(|second| {
-        // 计算双词前缀在原字符串中的结束位置
-        let first_end = trimmed.find(first).map_or(0, |pos| pos + first.len());
-        let second_start = trimmed
-            .get(first_end..)
-            .and_then(|s| s.find(second))
-            .map_or(first_end, |offset| first_end + offset);
-        let end = second_start + second.len();
-        trimmed.get(..end).unwrap_or_default()
-    });
-
-    (first, two_word)
-}
-
-/// 检查命令是否命中黑名单。
-fn is_blocked(command: &str) -> bool {
-    let trimmed = command.trim();
-    BLOCKED_COMMANDS
-        .iter()
-        .any(|blocked| trimmed.contains(blocked))
-}
-
-/// 检查命令是否在安全白名单中。
-///
-/// 对于多词白名单条目（如 `python -m py_compile`），检查命令是否以该前缀开头。
-fn is_safe(command: &str) -> bool {
-    let trimmed = command.trim();
-    let (single, _double) = extract_command_prefix(trimmed);
-
-    SAFE_COMMANDS.iter().any(|safe| {
-        if safe.contains(' ') {
-            // 多词命令：检查命令是否以白名单条目开头
-            trimmed.starts_with(safe)
-        } else {
-            single == *safe
-        }
-    })
 }
 
 /// 截断输出到指定最大长度，超出时追加提示。
@@ -197,20 +115,19 @@ impl Tool for ExecuteCommand {
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        // 1. 检查黑名单
-        if is_blocked(command) {
-            return Err(Error::Tool(format!("{MSG_BLOCKED}：{command}")));
-        }
-
-        // 2. 非白名单命令需用户确认
-        if !is_safe(command) {
-            let prompt = format!("即将执行未知命令：{command}，是否允许？");
-            if !(self.confirm)(&prompt) {
-                return Err(Error::Tool(MSG_USER_DENIED.into()));
+        match CommandPolicy::decide(command) {
+            CommandDecision::Block => {
+                return Err(Error::Tool(format!("{MSG_BLOCKED}：{command}")));
             }
+            CommandDecision::RequireConfirmation => {
+                let prompt = format!("即将执行未知命令：{command}，是否允许？");
+                if !(self.confirm)(&prompt) {
+                    return Err(Error::Tool(MSG_USER_DENIED.into()));
+                }
+            }
+            CommandDecision::Allow => {}
         }
 
-        // 3. 执行命令
         let child = Command::new(SHELL)
             .arg(SHELL_FLAG)
             .arg(command)
@@ -222,7 +139,6 @@ impl Tool for ExecuteCommand {
             .map_err(|_elapsed| Error::Tool(format!("{MSG_TIMEOUT}（{timeout_secs} 秒）")))?
             .map_err(|e| Error::Tool(format!("命令执行失败：{e}")))?;
 
-        // 4. 组合输出
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -248,31 +164,6 @@ impl Tool for ExecuteCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn safe_commands() {
-        assert!(is_safe("ls -la"));
-        assert!(is_safe("git log --oneline"));
-        assert!(is_safe("cargo clippy -- -D warnings"));
-        assert!(is_safe("cat /etc/passwd"));
-        assert!(is_safe("rg pattern ."));
-        assert!(is_safe("python -m py_compile foo.py"));
-    }
-
-    #[test]
-    fn unsafe_commands() {
-        assert!(!is_safe("curl http://example.com"));
-        assert!(!is_safe("wget something"));
-        assert!(!is_safe("sudo rm -rf /"));
-    }
-
-    #[test]
-    fn blocked_commands() {
-        assert!(is_blocked("rm -rf /"));
-        assert!(is_blocked("sudo mkfs.ext4 /dev/sda"));
-        assert!(is_blocked("shutdown -h now"));
-        assert!(!is_blocked("ls -la"));
-    }
 
     #[test]
     fn truncate_output_works() {

@@ -217,13 +217,7 @@ impl SessionSnapshot {
 /// 从会话消息聚合 token 用量。
 #[must_use]
 pub fn collect_session_metrics(messages: &[ChatMessage]) -> SessionMetrics {
-    let token_usage = messages.iter().filter_map(|message| message.usage).fold(
-        TokenUsage::default(),
-        |mut acc, usage| {
-            acc.add_assign(&usage);
-            acc
-        },
-    );
+    let token_usage = messages.iter().filter_map(|message| message.usage).sum();
 
     SessionMetrics { token_usage }
 }

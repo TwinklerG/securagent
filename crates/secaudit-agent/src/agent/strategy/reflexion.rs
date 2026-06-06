@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use super::{Strategy, StrategyResult};
-use crate::agent::EventBus;
+use crate::agent::events::EventBus;
 use crate::agent::executor::{ReActExecutor, StepResult};
 use crate::agent::state::AgentState;
 use crate::config::Config;
@@ -91,9 +91,7 @@ impl Strategy for ReflexionStrategy {
                 match step {
                     StepResult::ToolCalls(calls) => {
                         has_tool_calls = true;
-                        for call in &calls {
-                            events.notify_tool_call(&call.function.name, &call.function.arguments);
-                        }
+                        events.notify_tool_calls(&calls);
                         let _results = executor.execute_tool_calls(&calls).await?;
                         events.set_state(AgentState::Analyzing);
                         // 工具结果已作为 tool role 消息在历史中
@@ -143,9 +141,7 @@ impl Strategy for ReflexionStrategy {
                             tool_rounds = reflection_tool_rounds,
                             "反思生成阶段收到工具调用，自动执行后重试"
                         );
-                        for call in &calls {
-                            events.notify_tool_call(&call.function.name, &call.function.arguments);
-                        }
+                        events.notify_tool_calls(&calls);
                         let _results = executor.execute_tool_calls(&calls).await?;
                         events.set_state(AgentState::Analyzing);
 

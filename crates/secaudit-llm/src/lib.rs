@@ -17,6 +17,8 @@ use async_openai::types::chat::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::iter::Sum;
+use std::ops::AddAssign;
 use std::time::Duration;
 
 /// secaudit-llm 错误类型。
@@ -224,13 +226,6 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// 把 `other` 累加到当前统计。
-    pub fn add_assign(&mut self, other: &Self) {
-        self.prompt_tokens += other.prompt_tokens;
-        self.completion_tokens += other.completion_tokens;
-        self.total_tokens += other.total_tokens;
-    }
-
     /// 是否为零用量。
     #[must_use]
     pub const fn is_zero(self) -> bool {
@@ -243,10 +238,27 @@ impl TokenUsage {
         messages.iter().filter_map(|message| message.usage).fold(
             Self::default(),
             |mut acc, usage| {
-                acc.add_assign(&usage);
+                acc.add_assign(usage);
                 acc
             },
         )
+    }
+}
+
+impl AddAssign for TokenUsage {
+    fn add_assign(&mut self, rhs: Self) {
+        self.prompt_tokens += rhs.prompt_tokens;
+        self.completion_tokens += rhs.completion_tokens;
+        self.total_tokens += rhs.total_tokens;
+    }
+}
+
+impl Sum for TokenUsage {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |mut acc, usage| {
+            acc += usage;
+            acc
+        })
     }
 }
 
@@ -790,5 +802,39 @@ impl HttpLlmClient {
             .next()
             .and_then(|c| c.message.content)
             .ok_or_else(|| Error::Llm("API 返回空 choices".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenUsage;
+
+    #[test]
+    fn token_usage_uses_standard_add_assign_and_sum() {
+        let first = TokenUsage {
+            prompt_tokens: 2,
+            completion_tokens: 3,
+            total_tokens: 5,
+        };
+        let second = TokenUsage {
+            prompt_tokens: 7,
+            completion_tokens: 11,
+            total_tokens: 18,
+        };
+
+        let mut usage = first;
+        usage += second;
+
+        assert_eq!(
+            usage,
+            TokenUsage {
+                prompt_tokens: 9,
+                completion_tokens: 14,
+                total_tokens: 23,
+            }
+        );
+
+        let total: TokenUsage = [first, second].into_iter().sum();
+        assert_eq!(total, usage);
     }
 }

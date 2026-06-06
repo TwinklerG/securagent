@@ -1,12 +1,13 @@
 //! 文件写入工具 — 创建或覆写文件，用于生成修复补丁、PoC 或审计报告。
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::fs;
 
+use super::sandbox::resolve_writable_path;
 use crate::error::Error;
 use crate::tools::{ConfirmFn, Tool};
 
@@ -24,7 +25,6 @@ const PARAM_CONTENT: &str = "content";
 
 const MSG_MISSING_PATH: &str = "缺少 path 参数";
 const MSG_MISSING_CONTENT: &str = "缺少 content 参数";
-const MSG_OUTSIDE_SANDBOX: &str = "文件路径超出工作目录范围，禁止写入";
 const MSG_USER_DENIED: &str = "用户拒绝覆写文件";
 
 /// 文件写入工具，支持沙箱路径校验与覆写确认。
@@ -39,45 +39,6 @@ impl WriteFile {
     /// 创建实例。
     pub fn new(work_dir: PathBuf, confirm: ConfirmFn) -> Self {
         Self { work_dir, confirm }
-    }
-}
-
-/// 校验目标路径是否在沙箱工作目录内。
-fn validate_sandbox(target: &Path, work_dir: &Path) -> Result<(), Error> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| Error::Tool(format!("{MSG_OUTSIDE_SANDBOX}：无法获取父目录")))?;
-
-    // 父目录可能尚不存在，逐级向上查找已存在的祖先目录进行 canonicalize
-    let canonical_base = find_existing_ancestor(parent)
-        .and_then(|p| p.canonicalize().ok())
-        .ok_or_else(|| Error::Tool(format!("{MSG_OUTSIDE_SANDBOX}：无法解析路径")))?;
-
-    let canonical_work = work_dir
-        .canonicalize()
-        .map_err(|e| Error::Tool(format!("无法解析工作目录：{e}")))?;
-
-    if !canonical_base.starts_with(&canonical_work) {
-        return Err(Error::Tool(format!(
-            "{MSG_OUTSIDE_SANDBOX}：{} 不在 {} 内",
-            canonical_base.display(),
-            canonical_work.display()
-        )));
-    }
-
-    Ok(())
-}
-
-/// 沿路径向上查找第一个已存在的祖先目录。
-fn find_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut current = path.to_path_buf();
-    loop {
-        if current.exists() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
     }
 }
 
@@ -119,15 +80,7 @@ impl Tool for WriteFile {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool(MSG_MISSING_CONTENT.into()))?;
 
-        // 解析为绝对路径（相对路径基于工作目录）
-        let target = if Path::new(path_str).is_absolute() {
-            PathBuf::from(path_str)
-        } else {
-            self.work_dir.join(path_str)
-        };
-
-        // 沙箱校验
-        validate_sandbox(&target, &self.work_dir)?;
+        let target = resolve_writable_path(&self.work_dir, path_str)?;
 
         // 文件已存在时需用户确认覆写
         if target.exists() {
@@ -154,17 +107,5 @@ impl Tool for WriteFile {
             "文件已写入：{}（{bytes_written} 字节）",
             target.display()
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn find_existing_ancestor_works() {
-        // 根目录一定存在
-        let ancestor = find_existing_ancestor(Path::new("/tmp/a/b/c"));
-        assert!(ancestor.is_some(), "应能找到已存在的祖先目录");
     }
 }

@@ -6,13 +6,21 @@ use secaudit_storage::RUNTIME_DIR;
 
 use crate::error::Error;
 
+/// API key 环境变量。
 const ENV_API_KEY: &str = "SECAUDIT_API_KEY";
+/// API 基础 URL 环境变量。
 const ENV_API_BASE_URL: &str = "SECAUDIT_API_BASE_URL";
+/// 模型名称环境变量。
 const ENV_MODEL: &str = "SECAUDIT_MODEL";
+/// 最大循环轮次环境变量。
 const ENV_MAX_ITERATIONS: &str = "SECAUDIT_MAX_ITERATIONS";
+/// 推理策略环境变量。
 const ENV_STRATEGY: &str = "SECAUDIT_STRATEGY";
+/// 是否启用 Skills 环境变量。
 const ENV_ENABLE_SKILLS: &str = "SECAUDIT_ENABLE_SKILLS";
+/// 上下文窗口大小环境变量。
 const ENV_CONTEXT_WINDOW_TOKENS: &str = "SECAUDIT_CONTEXT_WINDOW_TOKENS";
+/// 默认配置文件名。
 const CONFIG_FILE: &str = "config.json";
 
 /// 默认 API 基础 URL

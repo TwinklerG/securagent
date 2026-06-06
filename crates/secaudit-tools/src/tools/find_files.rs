@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::shared::{canonicalize_work_dir, resolve_search_dir};
+use super::sandbox::{canonicalize_work_dir, resolve_search_dir};
 use crate::error::Error;
 use crate::tools::Tool;
 

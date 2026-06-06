@@ -12,6 +12,16 @@ pub enum StepResult {
     TextResponse(String),
 }
 
+fn step_result_from_response(response: &ChatMessage) -> StepResult {
+    if let Some(tool_calls) = &response.tool_calls
+        && !tool_calls.is_empty()
+    {
+        return StepResult::ToolCalls(tool_calls.clone());
+    }
+
+    StepResult::TextResponse(response.content.clone().unwrap_or_default())
+}
+
 /// `ReAct` 循环执行器，管理对话历史并协调 LLM 与工具交互。
 pub struct ReActExecutor<'a> {
     /// LLM 客户端引用
@@ -56,15 +66,7 @@ impl<'a> ReActExecutor<'a> {
         // 将 assistant 消息加入历史
         self.messages.push(response.clone());
 
-        if let Some(tool_calls) = &response.tool_calls
-            && !tool_calls.is_empty()
-        {
-            return Ok(StepResult::ToolCalls(tool_calls.clone()));
-        }
-
-        Ok(StepResult::TextResponse(
-            response.content.unwrap_or_default(),
-        ))
+        Ok(step_result_from_response(&response))
     }
 
     /// 流式执行一步 ReAct：与 [`Self::step`] 等价，但通过 `on_delta` 回调
@@ -85,15 +87,7 @@ impl<'a> ReActExecutor<'a> {
 
         self.messages.push(response.clone());
 
-        if let Some(tool_calls) = &response.tool_calls
-            && !tool_calls.is_empty()
-        {
-            return Ok(StepResult::ToolCalls(tool_calls.clone()));
-        }
-
-        Ok(StepResult::TextResponse(
-            response.content.unwrap_or_default(),
-        ))
+        Ok(step_result_from_response(&response))
     }
 
     /// 执行工具调用并将结果加入对话历史。
@@ -160,4 +154,60 @@ pub(crate) fn tool_definitions_from_tools(tools: &[Box<dyn Tool>]) -> Vec<ToolDe
             parameters: tool.parameters_schema(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::llm::{ChatMessage, FunctionCall, Role, ToolCallResponse};
+
+    use super::{StepResult, step_result_from_response};
+
+    #[test]
+    fn response_with_tool_calls_becomes_tool_step() {
+        let response = ChatMessage {
+            role: Role::Assistant,
+            content: Some("ignored when tool call exists".to_owned()),
+            tool_calls: Some(vec![ToolCallResponse {
+                id: "call-1".to_owned(),
+                r#type: "function".to_owned(),
+                function: FunctionCall {
+                    name: "read_file".to_owned(),
+                    arguments: r#"{"path":"src/main.rs"}"#.to_owned(),
+                },
+            }]),
+            tool_call_id: None,
+            usage: None,
+        };
+
+        match step_result_from_response(&response) {
+            StepResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls.first().map(|call| call.function.name.as_str()),
+                    Some("read_file")
+                );
+            }
+            StepResult::TextResponse(text) => {
+                panic!("expected tool calls, got text response: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn response_without_tool_calls_becomes_text_step() {
+        let response = ChatMessage {
+            role: Role::Assistant,
+            content: Some("done".to_owned()),
+            tool_calls: None,
+            tool_call_id: None,
+            usage: None,
+        };
+
+        match step_result_from_response(&response) {
+            StepResult::TextResponse(text) => assert_eq!(text, "done"),
+            StepResult::ToolCalls(calls) => {
+                panic!("expected text response, got {} tool calls", calls.len());
+            }
+        }
+    }
 }

@@ -1,19 +1,16 @@
-use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+mod index;
+
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use secaudit_storage::{FileLock, RuntimeLayout, canonical_work_dir};
+use secaudit_storage::{RuntimeLayout, canonical_work_dir};
 
 use crate::error::{Error, Result};
 use crate::model::{
     ManagedSession, ProjectKey, ProjectMetadata, SCHEMA_VERSION, SessionListItem, SessionMetadata,
     SessionStatus, StoredSession, has_persistable_messages,
 };
-
-const INDEX_COMPACT_MIN_BYTES: u64 = 16 * 1024;
-const INDEX_COMPACT_DUPLICATE_RATIO: usize = 2;
 
 /// 会话级持久化布局。
 ///
@@ -319,7 +316,7 @@ impl ConversationLayout {
 
     fn list_sessions_for_project(&self, key: &ProjectKey) -> Result<Vec<SessionMetadata>> {
         let index_file = self.session_index_file(key);
-        Ok(read_session_index(&index_file)?.into_sorted_sessions())
+        index::list_sessions(&index_file)
     }
 
     fn list_sessions_with_preview_for_project(
@@ -353,36 +350,7 @@ impl ConversationLayout {
 
     fn append_session_index(&self, key: &ProjectKey, metadata: &SessionMetadata) -> Result<()> {
         let index_file = self.session_index_file(key);
-        RuntimeLayout::ensure_dir(&self.runtime.sessions_dir(key.as_str()))?;
-
-        let _lock = FileLock::acquire(&index_file)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&index_file)?;
-        let line = serde_json::to_string(metadata)?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.flush()?;
-        drop(file);
-        Self::compact_session_index_if_needed(&index_file)?;
-        Ok(())
-    }
-
-    fn compact_session_index_if_needed(index_file: &Path) -> Result<()> {
-        let Ok(metadata) = fs::metadata(index_file) else {
-            return Ok(());
-        };
-        if metadata.len() < INDEX_COMPACT_MIN_BYTES {
-            return Ok(());
-        }
-
-        let index = read_session_index(index_file)?;
-        if !index.should_compact() {
-            return Ok(());
-        }
-
-        write_session_index_atomic(index_file, &index.into_sorted_sessions())
+        index::append_session(&index_file, metadata)
     }
 
     fn remove_opposite_status_file(
@@ -402,65 +370,6 @@ impl ConversationLayout {
         Ok(())
     }
 }
-
-// ── 会话索引 ──────────────────────────────────────────────────────────────────
-
-struct SessionIndex {
-    record_count: usize,
-    by_id: BTreeMap<String, SessionMetadata>,
-}
-
-impl SessionIndex {
-    fn should_compact(&self) -> bool {
-        let retained_count = self.by_id.len().max(1);
-        self.record_count > retained_count.saturating_mul(INDEX_COMPACT_DUPLICATE_RATIO)
-    }
-
-    fn into_sorted_sessions(self) -> Vec<SessionMetadata> {
-        let mut sessions: Vec<SessionMetadata> = self.by_id.into_values().collect();
-        sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        sessions
-    }
-}
-
-fn read_session_index(index_file: &Path) -> Result<SessionIndex> {
-    if !index_file.exists() {
-        return Ok(SessionIndex {
-            record_count: 0,
-            by_id: BTreeMap::new(),
-        });
-    }
-
-    let file = File::open(index_file)?;
-    let reader = BufReader::new(file);
-    let mut record_count = 0usize;
-    let mut by_id: BTreeMap<String, SessionMetadata> = BTreeMap::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        record_count += 1;
-        let metadata: SessionMetadata = serde_json::from_str(&line)?;
-        if metadata.message_count == 0 {
-            continue;
-        }
-        by_id.insert(metadata.session_id.clone(), metadata);
-    }
-
-    Ok(SessionIndex {
-        record_count,
-        by_id,
-    })
-}
-
-fn write_session_index_atomic(index_file: &Path, sessions: &[SessionMetadata]) -> Result<()> {
-    RuntimeLayout::write_jsonl_atomic(index_file, sessions)?;
-    Ok(())
-}
-
-// ── 助手函数 ──────────────────────────────────────────────────────────────────
 
 fn read_project_metadata(path: &Path) -> Result<ProjectMetadata> {
     let content = fs::read_to_string(path)?;

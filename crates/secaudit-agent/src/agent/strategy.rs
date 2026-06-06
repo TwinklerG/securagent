@@ -8,7 +8,7 @@ use std::str::FromStr;
 pub use react::ReactStrategy;
 pub use reflexion::ReflexionStrategy;
 
-use super::EventBus;
+use super::events::EventBus;
 use super::executor::ReActExecutor;
 use crate::config::Config;
 use crate::error::Error;

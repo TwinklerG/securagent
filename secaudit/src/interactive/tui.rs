@@ -37,7 +37,7 @@ use secaudit_agent::Agent;
 use secaudit_agent::TokenUsage;
 use secaudit_agent::llm::fetch_context_window;
 use secaudit_agent::state::AgentState;
-use secaudit_conversation::{ContextUsage, SessionListItem, SessionPreviewRole};
+use secaudit_conversation::{ContextUsage, SessionListItem};
 use secaudit_core::Config;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
@@ -968,7 +968,10 @@ impl TuiApp {
                 session.message_count,
                 session.updated_at
             ));
-            lines.push(format!("    预览：{}", session_preview_text(item)));
+            lines.push(format!(
+                "    预览：{}",
+                item.preview_text(SESSION_PREVIEW_MAX_CHARS)
+            ));
         }
         lines.push("使用 /session <序号> 或 /session <id> 切换会话，/new 新建会话。".to_owned());
 
@@ -1753,30 +1756,6 @@ fn short_session_id(session_id: Option<&str>) -> String {
     )
 }
 
-fn session_preview_text(item: &SessionListItem) -> String {
-    let Some(preview) = &item.preview else {
-        return "无用户/助手消息".to_owned();
-    };
-    let role = match preview.role {
-        SessionPreviewRole::User => "User",
-        SessionPreviewRole::Assistant => "Assistant",
-    };
-    format!(
-        "{role}: {}",
-        truncate_chars(&preview.content, SESSION_PREVIEW_MAX_CHARS)
-    )
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    const ELLIPSIS: &str = "...";
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-
-    let truncated = text.chars().take(max_chars).collect::<String>();
-    format!("{truncated}{ELLIPSIS}")
-}
-
 fn max_scroll_offset(total_lines: usize, viewport_height: u16) -> u16 {
     let viewport = usize::from(viewport_height.max(1));
     u16::try_from(total_lines.max(1).saturating_sub(viewport)).unwrap_or(u16::MAX)
@@ -1822,7 +1801,6 @@ fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
         wrapped
     }
 }
-
 fn cli_confirm(
     event_tx: mpsc::UnboundedSender<WorkerEvent>,
 ) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
