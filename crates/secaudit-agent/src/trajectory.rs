@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::agent::Finding;
-use crate::llm::{ChatMessage, Role, TokenUsage};
+use crate::llm::{ChatMessage, Role, TokenUsage, ToolCallResponse};
 
 /// 未知工具名称的默认值
 const UNKNOWN_TOOL_NAME: &str = "unknown";
@@ -142,35 +142,45 @@ fn convert_message(msg: &ChatMessage, idx: usize, all: &[ChatMessage]) -> Messag
             let content = msg.content.as_deref().unwrap_or_default();
             Message::human(content)
         }
-        Role::Assistant => {
-            let content = msg.content.clone().unwrap_or_default();
-            let tool_calls = msg.tool_calls.as_ref().map(|calls| {
-                calls
-                    .iter()
-                    .map(|tc| {
-                        let arguments = serde_json::from_str::<HashMap<String, serde_json::Value>>(
-                            &tc.function.arguments,
-                        )
-                        .unwrap_or_default();
-                        ToolCall {
-                            name: tc.function.name.clone(),
-                            arguments,
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            });
-
-            match tool_calls {
-                Some(calls) if !calls.is_empty() => Message::ai_with_tool_calls(content, calls),
-                _ => Message::ai(content),
-            }
-        }
-        Role::Tool => {
-            let content = msg.content.clone().unwrap_or_default();
-            let name = resolve_tool_name(msg, idx, all);
-            Message::tool(name, content)
-        }
+        Role::Assistant => convert_assistant_message(msg),
+        Role::Tool => convert_tool_message(msg, idx, all),
     }
+}
+
+fn convert_assistant_message(msg: &ChatMessage) -> Message {
+    let content = msg.content.clone().unwrap_or_default();
+    let tool_calls = msg
+        .tool_calls
+        .as_deref()
+        .map(convert_tool_calls)
+        .unwrap_or_default();
+
+    if tool_calls.is_empty() {
+        Message::ai(content)
+    } else {
+        Message::ai_with_tool_calls(content, tool_calls)
+    }
+}
+
+fn convert_tool_calls(calls: &[ToolCallResponse]) -> Vec<ToolCall> {
+    calls.iter().map(convert_tool_call).collect()
+}
+
+fn convert_tool_call(call: &ToolCallResponse) -> ToolCall {
+    ToolCall {
+        name: call.function.name.clone(),
+        arguments: parse_tool_arguments(&call.function.arguments),
+    }
+}
+
+fn parse_tool_arguments(raw: &str) -> HashMap<String, serde_json::Value> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn convert_tool_message(msg: &ChatMessage, idx: usize, all: &[ChatMessage]) -> Message {
+    let content = msg.content.clone().unwrap_or_default();
+    let name = resolve_tool_name(msg, idx, all);
+    Message::tool(name, content)
 }
 
 /// 从 `tool_call_id` 反查工具名称。
@@ -182,19 +192,77 @@ fn resolve_tool_name(msg: &ChatMessage, idx: usize, all: &[ChatMessage]) -> Stri
         return UNKNOWN_TOOL_NAME.into();
     };
 
-    // 向前搜索最近的 Assistant 消息
-    for prev in all.get(..idx).unwrap_or_default().iter().rev() {
-        if !matches!(prev.role, Role::Assistant) {
-            continue;
-        }
-        if let Some(calls) = &prev.tool_calls {
-            for tc in calls {
-                if tc.id == call_id {
-                    return tc.function.name.clone();
-                }
-            }
-        }
-    }
+    all.get(..idx)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .filter(|message| matches!(message.role, Role::Assistant))
+        .filter_map(|message| message.tool_calls.as_deref())
+        .flatten()
+        .find(|call| call.id == call_id)
+        .map_or_else(
+            || UNKNOWN_TOOL_NAME.into(),
+            |call| call.function.name.clone(),
+        )
+}
 
-    UNKNOWN_TOOL_NAME.into()
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::to_multi_turn_sample;
+    use crate::llm::{ChatMessage, FunctionCall, Role, ToolCallResponse};
+
+    #[test]
+    fn converts_assistant_tool_calls_and_tool_results() {
+        let messages = vec![
+            ChatMessage::user("查找文件"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: Some("我会读取文件".to_owned()),
+                tool_calls: Some(vec![ToolCallResponse {
+                    id: "call-1".to_owned(),
+                    r#type: "function".to_owned(),
+                    function: FunctionCall {
+                        name: "read_file".to_owned(),
+                        arguments: r#"{"path":"src/main.rs"}"#.to_owned(),
+                    },
+                }]),
+                tool_call_id: None,
+                usage: None,
+            },
+            ChatMessage::tool_result("call-1", "内容"),
+        ];
+
+        let sample = to_multi_turn_sample(&messages, &[], "src/main.rs");
+        let value = serde_json::to_value(sample).ok();
+
+        assert_eq!(
+            value
+                .as_ref()
+                .and_then(|value| value.pointer("/user_input/1")),
+            Some(&json!({
+                "role": "ai",
+                "content": "我会读取文件",
+                "tool_calls": [
+                    {
+                        "name": "read_file",
+                        "arguments": {
+                            "path": "src/main.rs"
+                        }
+                    }
+                ]
+            }))
+        );
+        assert_eq!(
+            value
+                .as_ref()
+                .and_then(|value| value.pointer("/user_input/2")),
+            Some(&json!({
+                "role": "tool",
+                "name": "read_file",
+                "content": "内容"
+            }))
+        );
+    }
 }

@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use secaudit_storage::RuntimeLayout;
+
 use crate::error::Result;
 use crate::model::SessionMetadata;
-use secaudit_storage::RuntimeLayout;
 
 const INDEX_COMPACT_MIN_BYTES: u64 = 16 * 1024;
 const INDEX_COMPACT_DUPLICATE_RATIO: usize = 2;

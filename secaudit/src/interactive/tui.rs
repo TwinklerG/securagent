@@ -9,30 +9,28 @@
     reason = "TUI 主渲染与事件循环集中管理便于维护"
 )]
 
+mod completion;
 mod event_format;
+mod input;
+mod layout;
 mod markdown;
+mod message;
+mod overlay;
+mod terminal;
 mod timestamp;
 
-use std::io::{self, IsTerminal, Stdout};
 use std::mem;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
-use std::time::SystemTime;
 
 use crossterm::event::{
     self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use crossterm::{ExecutableCommand, execute};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::{Frame, Terminal};
 use secaudit_agent::Agent;
 use secaudit_agent::TokenUsage;
 use secaudit_agent::llm::fetch_context_window;
@@ -40,16 +38,19 @@ use secaudit_agent::state::AgentState;
 use secaudit_conversation::{ContextUsage, SessionListItem};
 use secaudit_core::Config;
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 
 use super::commands::{Command, UserInput};
 use super::{
     ChatRequest, DisplayMessage, DisplayRole, SessionSnapshot, WorkerCommand, WorkerEvent,
     build_worker_conversation, parse_user_input, start_worker_session,
 };
+use completion::complete_command_input;
 use event_format::{summarize_tool_args, summarize_tool_result};
-use markdown::render_markdown_lines;
-use timestamp::{format_absolute_timestamp, now_timestamp};
+use input::{History, InputBuffer};
+use layout::split_tui_areas;
+use message::{ChatMessage, EventEntry, EventKind, MessageRole};
+use overlay::{centered_rect, draw_confirmation_overlay};
+use terminal::TerminalGuard;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const PENDING_USAGE_STEP: u64 = 16;
@@ -61,7 +62,6 @@ const MAX_MESSAGE_ITEMS: usize = 240;
 const KEY_CTRL_C: char = 'c';
 const KEY_CTRL_D: char = 'd';
 const DEFAULT_VIEWPORT_HEIGHT: u16 = 10;
-const MAX_INPUT_LINES: usize = 6;
 
 const WELCOME_MSG: &str = "secaudit -- 安全代码审计 Agent（TUI）";
 const HELP_HINT: &str = "输入审计指令后回车，命令：/help /new /sessions /session <id|序号> /status /tools /exit，Ctrl+D 退出";
@@ -104,154 +104,6 @@ const CLEAR_EVENT_SUMMARY: &str = "已开启新会话，当前视图与事件已
 const SESSIONS_EVENT_SUMMARY: &str = "已显示会话列表。";
 const SWITCH_SESSION_EVENT_SUMMARY: &str = "已切换会话。";
 const SESSION_PREVIEW_MAX_CHARS: usize = 96;
-const COMMAND_CANDIDATES: [&str; 11] = [
-    "/help",
-    "/new",
-    "/clear",
-    "/sessions",
-    "/session ",
-    "/status",
-    "/usage",
-    "/context",
-    "/tools",
-    "/skills",
-    "/exit",
-];
-
-const EVENT_PANEL_WIDTH_EXPANDED: u16 = 34;
-const EVENT_PANEL_WIDTH_COLLAPSED: u16 = 1;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MessageRole {
-    User,
-    Agent,
-    System,
-    Error,
-}
-
-impl MessageRole {
-    fn label(self) -> &'static str {
-        match self {
-            Self::User => "USER",
-            Self::Agent => "AGENT",
-            Self::System => "SYSTEM",
-            Self::Error => "ERROR",
-        }
-    }
-
-    fn label_style(self) -> Style {
-        match self {
-            Self::User => Style::default()
-                .fg(Color::Black)
-                .bg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-            Self::Agent => Style::default()
-                .fg(Color::Black)
-                .bg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD),
-            Self::System => Style::default()
-                .fg(Color::Black)
-                .bg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-            Self::Error => Style::default()
-                .fg(Color::White)
-                .bg(Color::Red)
-                .add_modifier(Modifier::BOLD),
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EventKind {
-    State,
-    ToolCall,
-    ToolResult,
-    System,
-    Error,
-}
-
-impl EventKind {
-    fn badge(self) -> &'static str {
-        match self {
-            Self::State => "STATE",
-            Self::ToolCall => "TOOL",
-            Self::ToolResult => "RESULT",
-            Self::System => "INFO",
-            Self::Error => "ERROR",
-        }
-    }
-
-    fn badge_style(self) -> Style {
-        match self {
-            Self::State => Style::default().fg(Color::Black).bg(Color::Magenta),
-            Self::ToolCall => Style::default().fg(Color::Black).bg(Color::Blue),
-            Self::ToolResult => Style::default().fg(Color::Black).bg(Color::Gray),
-            Self::System => Style::default().fg(Color::Black).bg(Color::Cyan),
-            Self::Error => Style::default().fg(Color::White).bg(Color::Red),
-        }
-        .add_modifier(Modifier::BOLD)
-    }
-
-    fn text_style(self) -> Style {
-        match self {
-            Self::Error => Style::default().fg(Color::LightRed),
-            Self::State => Style::default().fg(Color::LightMagenta),
-            Self::ToolCall => Style::default().fg(Color::LightBlue),
-            Self::System | Self::ToolResult => Style::default().fg(Color::White),
-        }
-    }
-}
-
-struct ChatMessage {
-    timestamp: SystemTime,
-    role: MessageRole,
-    content: String,
-}
-
-impl ChatMessage {
-    fn header_line(&self) -> Line<'static> {
-        let time = format_absolute_timestamp(self.timestamp);
-        let role_label = format!(" {:^7} ", self.role.label());
-
-        Line::from(vec![
-            Span::styled(time, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(role_label, self.role.label_style()),
-        ])
-    }
-
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![self.header_line()];
-        let mut body = render_markdown_lines(self.content.as_str());
-        if body.is_empty() {
-            body.push(Line::from(String::new()));
-        }
-        lines.extend(body);
-        lines.push(Line::from(String::new()));
-        lines
-    }
-}
-
-struct EventEntry {
-    timestamp: SystemTime,
-    kind: EventKind,
-    text: String,
-}
-
-impl EventEntry {
-    fn render_line(&self) -> Line<'static> {
-        let time = format_absolute_timestamp(self.timestamp);
-        let badge = format!(" {:^6} ", self.kind.badge());
-
-        Line::from(vec![
-            Span::styled(time, Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(badge, self.kind.badge_style()),
-            Span::raw(" "),
-            Span::styled(self.text.clone(), self.kind.text_style()),
-        ])
-    }
-}
 
 struct PendingConfirmation {
     prompt: String,
@@ -309,319 +161,6 @@ enum Overlay {
     Status(StatusTab),
     Usage,
     Context,
-}
-
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-}
-
-struct RawModeGuard;
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-    }
-}
-
-struct AlternateScreenGuard;
-
-impl Drop for AlternateScreenGuard {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    }
-}
-
-impl TerminalGuard {
-    fn new() -> io::Result<Self> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "TUI 需要连接到交互式终端（stdin/stdout 必须是 TTY）",
-            ));
-        }
-
-        enable_raw_mode()?;
-        let raw_mode_guard = RawModeGuard;
-
-        let mut stdout = io::stdout();
-        stdout.execute(EnterAlternateScreen)?;
-        let alternate_screen_guard = AlternateScreenGuard;
-
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.clear()?;
-
-        mem::forget(raw_mode_guard);
-        mem::forget(alternate_screen_guard);
-
-        Ok(Self { terminal })
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
-    }
-}
-
-#[derive(Default)]
-struct InputBuffer {
-    lines: Vec<String>,
-    cursor_line: usize,
-    cursor_col: usize,
-}
-
-impl InputBuffer {
-    fn new() -> Self {
-        Self {
-            lines: vec![String::new()],
-            cursor_line: 0,
-            cursor_col: 0,
-        }
-    }
-
-    fn ensure_invariants(&mut self) {
-        if self.lines.is_empty() {
-            self.lines.push(String::new());
-        }
-
-        if self.cursor_line >= self.lines.len() {
-            self.cursor_line = self.lines.len().saturating_sub(1);
-        }
-
-        let max_col = self.current_line_len();
-        if self.cursor_col > max_col {
-            self.cursor_col = max_col;
-        }
-    }
-
-    fn current_line_len(&self) -> usize {
-        self.lines
-            .get(self.cursor_line)
-            .map_or(0, |line| line.chars().count())
-    }
-
-    fn current_line_mut(&mut self) -> &mut String {
-        self.ensure_invariants();
-        &mut self.lines[self.cursor_line]
-    }
-
-    fn is_empty(&self) -> bool {
-        self.lines.first().is_some_and(String::is_empty) && self.lines.len() == 1
-    }
-
-    fn clear(&mut self) {
-        self.lines.clear();
-        self.lines.push(String::new());
-        self.cursor_line = 0;
-        self.cursor_col = 0;
-    }
-
-    fn text(&self) -> String {
-        self.lines.join("\n")
-    }
-
-    fn set_text(&mut self, text: &str) {
-        let mut split: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
-        if split.is_empty() {
-            split.push(String::new());
-        }
-        self.lines = split;
-        self.cursor_line = self.lines.len().saturating_sub(1);
-        self.cursor_col = self.current_line_len();
-    }
-
-    fn insert_char(&mut self, ch: char) {
-        let col = self.cursor_col;
-        let line = self.current_line_mut();
-        let byte = char_to_byte_idx(line, col);
-        line.insert(byte, ch);
-        self.cursor_col += 1;
-    }
-
-    fn backspace(&mut self) {
-        self.ensure_invariants();
-
-        if self.cursor_col > 0 {
-            let cursor = self.cursor_col;
-            let line = self.current_line_mut();
-            let start = char_to_byte_idx(line, cursor - 1);
-            let end = char_to_byte_idx(line, cursor);
-            line.replace_range(start..end, "");
-            self.cursor_col -= 1;
-            return;
-        }
-
-        if self.cursor_line > 0 {
-            let current = self.lines.remove(self.cursor_line);
-            self.cursor_line -= 1;
-            let prev_len = self.current_line_len();
-            if let Some(prev) = self.lines.get_mut(self.cursor_line) {
-                prev.push_str(&current);
-            }
-            self.cursor_col = prev_len;
-        }
-    }
-
-    fn newline(&mut self) {
-        self.ensure_invariants();
-        if self.lines.len() >= MAX_INPUT_LINES {
-            return;
-        }
-
-        let cursor = self.cursor_col;
-        let line = self.current_line_mut();
-        let split = char_to_byte_idx(line, cursor);
-        let tail = line.split_off(split);
-        let insert_at = self.cursor_line + 1;
-        self.lines.insert(insert_at, tail);
-        self.cursor_line = insert_at;
-        self.cursor_col = 0;
-    }
-
-    fn move_left(&mut self) {
-        self.ensure_invariants();
-
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-            return;
-        }
-        if self.cursor_line > 0 {
-            self.cursor_line -= 1;
-            self.cursor_col = self.current_line_len();
-        }
-    }
-
-    fn move_right(&mut self) {
-        self.ensure_invariants();
-
-        let line_len = self.current_line_len();
-        if self.cursor_col < line_len {
-            self.cursor_col += 1;
-            return;
-        }
-        if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
-            self.cursor_col = 0;
-        }
-    }
-
-    fn move_up(&mut self) {
-        self.ensure_invariants();
-
-        if self.cursor_line == 0 {
-            return;
-        }
-        self.cursor_line -= 1;
-        self.cursor_col = self.cursor_col.min(self.current_line_len());
-    }
-
-    fn move_down(&mut self) {
-        self.ensure_invariants();
-
-        if self.cursor_line + 1 >= self.lines.len() {
-            return;
-        }
-        self.cursor_line += 1;
-        self.cursor_col = self.cursor_col.min(self.current_line_len());
-    }
-
-    fn move_line_start(&mut self) {
-        self.cursor_col = 0;
-    }
-
-    fn move_line_end(&mut self) {
-        self.ensure_invariants();
-        self.cursor_col = self.current_line_len();
-    }
-
-    fn cursor_display_col(&self) -> usize {
-        let Some(line) = self.lines.get(self.cursor_line) else {
-            return 0;
-        };
-
-        let byte_idx = char_to_byte_idx(line, self.cursor_col);
-        line.get(..byte_idx).map_or(0, UnicodeWidthStr::width)
-    }
-
-    fn visual_lines(&self) -> Vec<Line<'_>> {
-        if self.lines.iter().all(String::is_empty) {
-            return vec![Line::from(Span::styled(
-                "输入审计指令...",
-                Style::default().fg(Color::DarkGray),
-            ))];
-        }
-
-        self.lines
-            .iter()
-            .map(|line| Line::from(line.as_str()))
-            .collect::<Vec<_>>()
-    }
-}
-
-fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
-    if char_idx == s.chars().count() {
-        return s.len();
-    }
-
-    s.char_indices()
-        .nth(char_idx)
-        .map_or(s.len(), |(idx, _)| idx)
-}
-
-#[derive(Default)]
-struct History {
-    entries: Vec<String>,
-    browse_index: Option<usize>,
-}
-
-impl History {
-    fn push(&mut self, entry: String) {
-        if entry.trim().is_empty() {
-            return;
-        }
-        if self.entries.last().is_some_and(|last| last == &entry) {
-            self.browse_index = None;
-            return;
-        }
-        self.entries.push(entry);
-        self.browse_index = None;
-    }
-
-    fn prev(&mut self) -> Option<String> {
-        if self.entries.is_empty() {
-            return None;
-        }
-
-        let next = match self.browse_index {
-            None => self.entries.len().saturating_sub(1),
-            Some(0) => 0,
-            Some(idx) => idx.saturating_sub(1),
-        };
-        self.browse_index = Some(next);
-        self.entries.get(next).cloned()
-    }
-
-    fn next(&mut self) -> Option<String> {
-        match self.browse_index {
-            None => None,
-            Some(idx) if idx + 1 >= self.entries.len() => {
-                self.browse_index = None;
-                Some(String::new())
-            }
-            Some(idx) => {
-                let next = idx + 1;
-                self.browse_index = Some(next);
-                self.entries.get(next).cloned()
-            }
-        }
-    }
-
-    fn reset_browse(&mut self) {
-        self.browse_index = None;
-    }
 }
 
 struct TuiApp {
@@ -718,11 +257,7 @@ impl TuiApp {
     }
 
     fn push_message(&mut self, role: MessageRole, text: &str) {
-        self.messages.push(ChatMessage {
-            timestamp: now_timestamp(),
-            role,
-            content: text.to_owned(),
-        });
+        self.messages.push(ChatMessage::new(role, text));
 
         if self.messages.len() > MAX_MESSAGE_ITEMS {
             let overflow = self.messages.len().saturating_sub(MAX_MESSAGE_ITEMS);
@@ -765,11 +300,7 @@ impl TuiApp {
         }
 
         if self.streaming_index.is_none() {
-            self.messages.push(ChatMessage {
-                timestamp: now_timestamp(),
-                role: MessageRole::Agent,
-                content: String::new(),
-            });
+            self.messages.push(ChatMessage::empty_agent());
             if self.messages.len() > MAX_MESSAGE_ITEMS {
                 let overflow = self.messages.len().saturating_sub(MAX_MESSAGE_ITEMS);
                 self.messages.drain(0..overflow);
@@ -835,11 +366,7 @@ impl TuiApp {
     }
 
     fn push_event(&mut self, kind: EventKind, text: String) {
-        self.events.push(EventEntry {
-            timestamp: now_timestamp(),
-            kind,
-            text,
-        });
+        self.events.push(EventEntry::new(kind, text));
 
         if self.events.len() > MAX_EVENT_LINES {
             let overflow = self.events.len().saturating_sub(MAX_EVENT_LINES);
@@ -1075,42 +602,7 @@ impl TuiApp {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
-        let root = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7),
-                Constraint::Min(4),
-                Constraint::Length(4),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
-
-        let [header_area, center_area, input_area, footer_area] = root.as_ref() else {
-            return;
-        };
-
-        let header_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
-            .split(*header_area);
-
-        let [workspace_area, runtime_area] = header_chunks.as_ref() else {
-            return;
-        };
-
-        let center_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(32),
-                Constraint::Length(if self.event_panel_collapsed {
-                    EVENT_PANEL_WIDTH_COLLAPSED
-                } else {
-                    EVENT_PANEL_WIDTH_EXPANDED
-                }),
-            ])
-            .split(*center_area);
-
-        let [chat_area, event_area] = center_chunks.as_ref() else {
+        let Some(areas) = split_tui_areas(frame.area(), self.event_panel_collapsed) else {
             return;
         };
 
@@ -1167,8 +659,8 @@ impl TuiApp {
         ])
         .block(Block::default().borders(Borders::ALL).title("Runtime"));
 
-        self.chat_viewport_height = chat_area.height.saturating_sub(2);
-        self.chat_viewport_width = chat_area.width.saturating_sub(2).max(1);
+        self.chat_viewport_height = areas.chat.height.saturating_sub(2);
+        self.chat_viewport_width = areas.chat.width.saturating_sub(2).max(1);
         let chat_lines = wrap_lines(
             self.rendered_chat_lines(),
             usize::from(self.chat_viewport_width),
@@ -1189,18 +681,18 @@ impl TuiApp {
             .block(Block::default().borders(Borders::ALL).title(chat_title))
             .scroll((self.chat_scroll, 0));
 
-        frame.render_widget(header_title, *workspace_area);
-        frame.render_widget(metrics, *runtime_area);
-        frame.render_widget(chat_panel, *chat_area);
+        frame.render_widget(header_title, areas.workspace);
+        frame.render_widget(metrics, areas.runtime);
+        frame.render_widget(chat_panel, areas.chat);
 
         if self.event_panel_collapsed {
             let collapsed = Paragraph::new("E")
                 .style(Style::default().fg(Color::DarkGray))
                 .block(Block::default().borders(Borders::LEFT));
-            frame.render_widget(collapsed, *event_area);
+            frame.render_widget(collapsed, areas.event);
         } else {
-            self.event_viewport_height = event_area.height.saturating_sub(2);
-            self.event_viewport_width = event_area.width.saturating_sub(2).max(1);
+            self.event_viewport_height = areas.event.height.saturating_sub(2);
+            self.event_viewport_width = areas.event.width.saturating_sub(2).max(1);
             let event_lines = wrap_lines(
                 self.rendered_event_lines(),
                 usize::from(self.event_viewport_width),
@@ -1213,7 +705,7 @@ impl TuiApp {
             let event_panel = Paragraph::new(event_lines)
                 .block(Block::default().borders(Borders::ALL).title("Events"))
                 .scroll((self.event_scroll, 0));
-            frame.render_widget(event_panel, *event_area);
+            frame.render_widget(event_panel, areas.event);
         }
 
         let input_title = if self.busy {
@@ -1229,8 +721,8 @@ impl TuiApp {
         let footer = Paragraph::new(format!("{FOOTER_HINT}  /usage /context"))
             .style(Style::default().fg(Color::DarkGray));
 
-        frame.render_widget(input_panel, *input_area);
-        frame.render_widget(footer, *footer_area);
+        frame.render_widget(input_panel, areas.input);
+        frame.render_widget(footer, areas.footer);
 
         if let Some(pending) = &self.pending_confirmation {
             draw_confirmation_overlay(frame, &pending.prompt);
@@ -1239,8 +731,8 @@ impl TuiApp {
         } else {
             let col_u16 = u16::try_from(self.input.cursor_display_col()).unwrap_or(u16::MAX);
             let line_u16 = u16::try_from(self.input.cursor_line).unwrap_or(u16::MAX);
-            let cursor_x = input_area.x.saturating_add(1).saturating_add(col_u16);
-            let cursor_y = input_area.y.saturating_add(1).saturating_add(line_u16);
+            let cursor_x = areas.input.x.saturating_add(1).saturating_add(col_u16);
+            let cursor_y = areas.input.y.saturating_add(1).saturating_add(line_u16);
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
@@ -1305,24 +797,8 @@ impl TuiApp {
 
     fn apply_tab_completion(&mut self) {
         let text = self.input.text();
-        if !text.starts_with('/') || text.contains('\n') {
-            return;
-        }
-
-        let current = text.trim();
-        let mut candidates = COMMAND_CANDIDATES
-            .iter()
-            .copied()
-            .filter(|cmd| cmd.starts_with(current))
-            .collect::<Vec<_>>();
-
-        if candidates.is_empty() {
-            return;
-        }
-
-        candidates.sort_unstable();
-        if let Some(first) = candidates.first().copied() {
-            self.input.set_text(first);
+        if let Some(completed) = complete_command_input(&text) {
+            self.input.set_text(completed);
         }
     }
 
@@ -1675,70 +1151,6 @@ fn context_part_line(label: &str, tokens: u64, total_tokens: u64) -> Line<'stati
 
 fn percent_tenths(value: u64, total: u64) -> u64 {
     value.saturating_mul(1_000).checked_div(total).unwrap_or(0)
-}
-
-fn draw_confirmation_overlay(frame: &mut Frame<'_>, prompt: &str) {
-    let area = centered_rect(72, 32, frame.area());
-    let lines = vec![
-        Line::from(Span::styled(
-            "工具确认",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(String::new()),
-        Line::from(prompt.to_owned()),
-        Line::from(String::new()),
-        Line::from(vec![
-            Span::styled("Y", Style::default().fg(Color::LightGreen)),
-            Span::raw(" 允许    "),
-            Span::styled("N / Esc / Enter", Style::default().fg(Color::LightRed)),
-            Span::raw(" 拒绝"),
-        ]),
-    ];
-
-    let panel = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Confirmation")
-                .border_style(Style::default().fg(Color::Yellow)),
-        )
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(panel, area);
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, outer: Rect) -> Rect {
-    let top = (100u16.saturating_sub(percent_y)) / 2;
-    let left = (100u16.saturating_sub(percent_x)) / 2;
-
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(top),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage(top),
-        ])
-        .split(outer);
-
-    let middle = match vertical.as_ref() {
-        [_, mid, _] => *mid,
-        _ => return outer,
-    };
-
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(left),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage(left),
-        ])
-        .split(middle);
-
-    match horizontal.as_ref() {
-        [_, mid, _] => *mid,
-        _ => outer,
-    }
 }
 
 fn first_line(text: &str) -> &str {

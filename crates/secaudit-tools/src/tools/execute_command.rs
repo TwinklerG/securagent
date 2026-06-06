@@ -47,6 +47,7 @@ const MSG_MISSING_COMMAND: &str = "缺少 command 参数";
 const MSG_BLOCKED: &str = "命令已被安全策略禁止";
 const MSG_USER_DENIED: &str = "用户拒绝执行该命令";
 const MSG_TIMEOUT: &str = "命令执行超时";
+const MSG_NO_OUTPUT: &str = "（命令已执行，无输出）";
 const MSG_TRUNCATED: &str = "\n\n[输出已截断，超出最大长度限制]";
 
 /// Shell 命令执行工具，内置安全白名单与黑名单机制。
@@ -75,6 +76,29 @@ fn truncate_output(output: &str) -> String {
     let mut result = truncated;
     result.push_str(MSG_TRUNCATED);
     result
+}
+
+/// 合并命令标准输出和标准错误。
+fn format_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+
+    let mut combined = String::new();
+    if !stdout.is_empty() {
+        combined.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+
+    if combined.is_empty() {
+        combined.push_str(MSG_NO_OUTPUT);
+    }
+
+    combined
 }
 
 #[async_trait]
@@ -139,24 +163,7 @@ impl Tool for ExecuteCommand {
             .map_err(|_elapsed| Error::Tool(format!("{MSG_TIMEOUT}（{timeout_secs} 秒）")))?
             .map_err(|e| Error::Tool(format!("命令执行失败：{e}")))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let mut combined = String::new();
-        if !stdout.is_empty() {
-            combined.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !combined.is_empty() {
-                combined.push('\n');
-            }
-            combined.push_str(&stderr);
-        }
-
-        if combined.is_empty() {
-            combined.push_str("（命令已执行，无输出）");
-        }
-
+        let combined = format_command_output(&output.stdout, &output.stderr);
         Ok(truncate_output(&combined))
     }
 }
@@ -174,5 +181,13 @@ mod tests {
         let result = truncate_output(&long);
         assert!(result.len() < long.len() + MSG_TRUNCATED.len());
         assert!(result.ends_with(MSG_TRUNCATED));
+    }
+
+    #[test]
+    fn command_output_combines_stdout_and_stderr() {
+        assert_eq!(format_command_output(b"out", b""), "out");
+        assert_eq!(format_command_output(b"", b"err"), "err");
+        assert_eq!(format_command_output(b"out", b"err"), "out\nerr");
+        assert_eq!(format_command_output(b"", b""), MSG_NO_OUTPUT);
     }
 }

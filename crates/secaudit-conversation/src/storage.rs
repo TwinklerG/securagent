@@ -21,6 +21,11 @@ pub struct ConversationLayout {
     runtime: RuntimeLayout,
 }
 
+struct SessionArchivePaths {
+    active: PathBuf,
+    archived: PathBuf,
+}
+
 impl ConversationLayout {
     /// 使用默认 `~/.secaudit` 根目录。
     ///
@@ -131,8 +136,7 @@ impl ConversationLayout {
 
         let project_file = self.project_file(&key);
         let metadata = if project_file.exists() {
-            let content = fs::read_to_string(&project_file)?;
-            let mut metadata: ProjectMetadata = serde_json::from_str(&content)?;
+            let mut metadata: ProjectMetadata = RuntimeLayout::read_json(&project_file)?;
             metadata.updated_at = now;
             metadata
         } else {
@@ -231,37 +235,19 @@ impl ConversationLayout {
     pub fn archive_session(&self, work_dir: &Path, session_id: &str) -> Result<SessionMetadata> {
         validate_session_id(session_id)?;
         let project = self.ensure_project(work_dir)?;
-        let active_path =
-            self.session_file(&project.project_key, SessionStatus::Active, session_id);
-        if !active_path.exists() {
-            let archived_path =
-                self.session_file(&project.project_key, SessionStatus::Archived, session_id);
-            if archived_path.exists() {
-                return Err(Error::InvalidSessionStatus {
-                    session_id: session_id.to_owned(),
-                    status: SessionStatus::Archived.to_string(),
-                });
-            }
-            return Err(Error::SessionNotFound {
-                session_id: session_id.to_owned(),
-            });
-        }
-
-        let content = fs::read_to_string(&active_path)?;
-        let mut stored: StoredSession = serde_json::from_str(&content)?;
+        let paths = self.session_archive_paths(&project.project_key, session_id)?;
+        let mut stored: StoredSession = RuntimeLayout::read_json(&paths.active)?;
         stored.status = SessionStatus::Archived;
         stored.updated_at = now_rfc3339();
 
-        let archived_path =
-            self.session_file(&project.project_key, SessionStatus::Archived, session_id);
-        if archived_path.exists() {
+        if paths.archived.exists() {
             return Err(Error::Storage(secaudit_storage::Error::PathConflict {
-                path: archived_path,
+                path: paths.archived,
             }));
         }
 
-        RuntimeLayout::write_json_atomic(&archived_path, &stored)?;
-        fs::remove_file(&active_path)?;
+        RuntimeLayout::write_json_atomic(&paths.archived, &stored)?;
+        fs::remove_file(&paths.active)?;
 
         let metadata = SessionMetadata::from_stored_session(&stored);
         self.append_session_index(&project.project_key, &metadata)?;
@@ -336,8 +322,7 @@ impl ConversationLayout {
         for status in [SessionStatus::Active, SessionStatus::Archived] {
             let path = self.session_file(key, status, session_id);
             if path.exists() {
-                let content = fs::read_to_string(path)?;
-                return Ok(serde_json::from_str(&content)?);
+                return RuntimeLayout::read_json(&path);
             }
         }
 
@@ -353,17 +338,37 @@ impl ConversationLayout {
         index::append_session(&index_file, metadata)
     }
 
+    fn session_archive_paths(
+        &self,
+        key: &ProjectKey,
+        session_id: &str,
+    ) -> Result<SessionArchivePaths> {
+        let active = self.session_file(key, SessionStatus::Active, session_id);
+        let archived = self.session_file(key, SessionStatus::Archived, session_id);
+
+        if active.exists() {
+            return Ok(SessionArchivePaths { active, archived });
+        }
+
+        if archived.exists() {
+            return Err(Error::InvalidSessionStatus {
+                session_id: session_id.to_owned(),
+                status: SessionStatus::Archived.as_str().to_owned(),
+            });
+        }
+
+        Err(Error::SessionNotFound {
+            session_id: session_id.to_owned(),
+        })
+    }
+
     fn remove_opposite_status_file(
         &self,
         key: &ProjectKey,
         status: SessionStatus,
         session_id: &str,
     ) -> Result<()> {
-        let opposite = match status {
-            SessionStatus::Active => SessionStatus::Archived,
-            SessionStatus::Archived => SessionStatus::Active,
-        };
-        let path = self.session_file(key, opposite, session_id);
+        let path = self.session_file(key, status.opposite(), session_id);
         if path.exists() {
             fs::remove_file(path)?;
         }
@@ -372,8 +377,7 @@ impl ConversationLayout {
 }
 
 fn read_project_metadata(path: &Path) -> Result<ProjectMetadata> {
-    let content = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&content)?)
+    RuntimeLayout::read_json(path)
 }
 
 fn stable_path_suffix(path: &Path) -> String {

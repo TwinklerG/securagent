@@ -7,10 +7,11 @@
 
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestUserMessageArgs, ChatCompletionStreamOptions, ChatCompletionTool,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
+    ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
+    ChatCompletionStreamOptions, ChatCompletionStreamResponseDelta, ChatCompletionTool,
     ChatCompletionTools, CreateChatCompletionRequestArgs, CreateChatCompletionStreamResponse,
     FunctionCall as OpenAIFunctionCall, FunctionObjectArgs,
 };
@@ -381,6 +382,20 @@ struct ToolCallAccumulator {
 }
 
 impl ToolCallAccumulator {
+    fn ingest_chunk(&mut self, chunk: ChatCompletionMessageToolCallChunk) {
+        if let Some(id) = chunk.id {
+            self.id = Some(id);
+        }
+        if let Some(function) = chunk.function {
+            if let Some(name) = function.name {
+                self.name = Some(name);
+            }
+            if let Some(arguments) = function.arguments {
+                self.arguments.push_str(&arguments);
+            }
+        }
+    }
+
     fn into_response(self) -> ToolCallResponse {
         ToolCallResponse {
             id: self.id.unwrap_or_default(),
@@ -416,49 +431,54 @@ impl StreamAggregator {
 
     /// 消费一个 chunk，返回文本增量和真实 usage（若服务商在本 chunk 提供）。
     fn ingest(&mut self, chunk: CreateChatCompletionStreamResponse) -> StreamUpdate {
-        let usage = chunk.usage.as_ref().map(|chunk_usage| {
-            let usage = TokenUsage {
-                prompt_tokens: chunk_usage.prompt_tokens.into(),
-                completion_tokens: chunk_usage.completion_tokens.into(),
-                total_tokens: chunk_usage.total_tokens.into(),
-            };
-            self.usage = Some(usage);
-            usage
+        let usage = self.ingest_usage(&chunk);
+        let delta = chunk
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| self.ingest_delta(choice.delta));
+
+        StreamUpdate { delta, usage }
+    }
+
+    fn ingest_usage(&mut self, chunk: &CreateChatCompletionStreamResponse) -> Option<TokenUsage> {
+        let usage = chunk.usage.as_ref().map(|chunk_usage| TokenUsage {
+            prompt_tokens: chunk_usage.prompt_tokens.into(),
+            completion_tokens: chunk_usage.completion_tokens.into(),
+            total_tokens: chunk_usage.total_tokens.into(),
         });
+        if let Some(usage) = usage {
+            self.usage = Some(usage);
+        }
+        usage
+    }
 
-        let Some(choice) = chunk.choices.into_iter().next() else {
-            return StreamUpdate { delta: None, usage };
-        };
-        let delta = choice.delta;
-
-        if let Some(tc_chunks) = delta.tool_calls {
-            for tc in tc_chunks {
-                let entry = self.tool_calls.entry(tc.index).or_default();
-                if let Some(id) = tc.id {
-                    entry.id = Some(id);
-                }
-                if let Some(func) = tc.function {
-                    if let Some(name) = func.name {
-                        entry.name = Some(name);
-                    }
-                    if let Some(args) = func.arguments {
-                        entry.arguments.push_str(&args);
-                    }
-                }
-            }
+    fn ingest_delta(&mut self, delta: ChatCompletionStreamResponseDelta) -> Option<String> {
+        if let Some(tool_call_chunks) = delta.tool_calls {
+            self.ingest_tool_call_chunks(tool_call_chunks);
         }
 
-        if let Some(text) = delta.content
+        self.ingest_text_delta(delta.content)
+    }
+
+    fn ingest_tool_call_chunks(&mut self, chunks: Vec<ChatCompletionMessageToolCallChunk>) {
+        for chunk in chunks {
+            self.tool_calls
+                .entry(chunk.index)
+                .or_default()
+                .ingest_chunk(chunk);
+        }
+    }
+
+    fn ingest_text_delta(&mut self, text: Option<String>) -> Option<String> {
+        if let Some(text) = text
             && !text.is_empty()
         {
             self.content.push_str(&text);
-            return StreamUpdate {
-                delta: Some(text),
-                usage,
-            };
+            return Some(text);
         }
 
-        StreamUpdate { delta: None, usage }
+        None
     }
 
     /// 流结束后产出装配好的 assistant `ChatMessage`。
@@ -807,7 +827,10 @@ impl HttpLlmClient {
 
 #[cfg(test)]
 mod tests {
-    use super::TokenUsage;
+    use async_openai::types::chat::CreateChatCompletionStreamResponse;
+    use serde_json::json;
+
+    use super::{StreamAggregator, TokenUsage};
 
     #[test]
     fn token_usage_uses_standard_add_assign_and_sum() {
@@ -836,5 +859,145 @@ mod tests {
 
         let total: TokenUsage = [first, second].into_iter().sum();
         assert_eq!(total, usage);
+    }
+
+    #[test]
+    fn stream_aggregator_collects_text_tool_calls_and_usage() {
+        let mut aggregator = StreamAggregator::new();
+        let first_tool_call =
+            tool_call_chunk(&json!("call-1"), &json!("read_file"), &json!("{\"path\""));
+        let second_tool_call = tool_call_chunk(
+            &serde_json::Value::Null,
+            &serde_json::Value::Null,
+            &json!(":\"src/main.rs\"}"),
+        );
+
+        let first_update =
+            aggregator.ingest(choice_chunk(&text_delta("hel", &serde_json::Value::Null)));
+        assert_eq!(first_update.delta.as_deref(), Some("hel"));
+        assert_eq!(first_update.usage, None);
+
+        let second_update = aggregator.ingest(choice_chunk(&text_delta("lo", &first_tool_call)));
+        assert_eq!(second_update.delta.as_deref(), Some("lo"));
+        assert_eq!(second_update.usage, None);
+
+        let tool_only_update = aggregator.ingest(choice_chunk(&null_text_delta(&second_tool_call)));
+        assert_eq!(tool_only_update.delta, None);
+        assert_eq!(tool_only_update.usage, None);
+
+        let usage_update = aggregator.ingest(usage_chunk());
+        assert_eq!(usage_update.delta, None);
+        assert_eq!(
+            usage_update.usage,
+            Some(TokenUsage {
+                prompt_tokens: 2,
+                completion_tokens: 3,
+                total_tokens: 5,
+            })
+        );
+
+        let message = aggregator.finish();
+        assert_eq!(message.content.as_deref(), Some("hello"));
+        assert_eq!(
+            message.usage,
+            Some(TokenUsage {
+                prompt_tokens: 2,
+                completion_tokens: 3,
+                total_tokens: 5,
+            })
+        );
+        let tool_call = message.tool_calls.as_ref().and_then(|calls| calls.first());
+        assert_eq!(tool_call.map(|call| call.id.as_str()), Some("call-1"));
+        assert_eq!(
+            tool_call.map(|call| call.function.name.as_str()),
+            Some("read_file")
+        );
+        assert_eq!(
+            tool_call.map(|call| call.function.arguments.as_str()),
+            Some(r#"{"path":"src/main.rs"}"#)
+        );
+    }
+
+    fn choice_chunk(delta: &serde_json::Value) -> CreateChatCompletionStreamResponse {
+        stream_chunk(json!({
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": null,
+                    "logprobs": null
+                }
+            ],
+            "usage": null
+        }))
+    }
+
+    fn text_delta(content: &str, tool_call: &serde_json::Value) -> serde_json::Value {
+        json!({
+            "content": content,
+            "function_call": null,
+            "tool_calls": optional_tool_calls(tool_call),
+            "role": null,
+            "refusal": null
+        })
+    }
+
+    fn null_text_delta(tool_call: &serde_json::Value) -> serde_json::Value {
+        json!({
+            "content": null,
+            "function_call": null,
+            "tool_calls": optional_tool_calls(tool_call),
+            "role": null,
+            "refusal": null
+        })
+    }
+
+    fn optional_tool_calls(tool_call: &serde_json::Value) -> serde_json::Value {
+        if tool_call.is_null() {
+            serde_json::Value::Null
+        } else {
+            json!([tool_call.clone()])
+        }
+    }
+
+    fn tool_call_chunk(
+        id: &serde_json::Value,
+        name: &serde_json::Value,
+        arguments: &serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "index": 0,
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": arguments
+            }
+        })
+    }
+
+    fn usage_chunk() -> CreateChatCompletionStreamResponse {
+        stream_chunk(json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+                "prompt_tokens_details": null,
+                "completion_tokens_details": null
+            }
+        }))
+    }
+
+    fn stream_chunk(mut value: serde_json::Value) -> CreateChatCompletionStreamResponse {
+        let object = value.as_object_mut().expect("chunk JSON must be an object");
+        object.insert("id".to_owned(), json!("chatcmpl-test"));
+        object.insert("created".to_owned(), json!(0));
+        object.insert("model".to_owned(), json!("test-model"));
+        object.insert("service_tier".to_owned(), serde_json::Value::Null);
+        object.insert("system_fingerprint".to_owned(), serde_json::Value::Null);
+        object.insert("object".to_owned(), json!("chat.completion.chunk"));
+
+        serde_json::from_value(value).expect("valid stream chunk")
     }
 }

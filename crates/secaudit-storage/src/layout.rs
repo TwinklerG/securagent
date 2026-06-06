@@ -185,6 +185,16 @@ impl RuntimeLayout {
         Ok(())
     }
 
+    /// 读取并解析 JSON 文件。
+    ///
+    /// # Errors
+    ///
+    /// 文件读取或 JSON 解析失败时返回错误。
+    pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+        let content = fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&content)?)
+    }
+
     // ── JSONL 读写 ──────────────────────────────────────────────────────────
 
     /// 向 JSONL 文件追加一行 JSON。

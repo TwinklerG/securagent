@@ -74,23 +74,34 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    /// 存储子目录名。
+    /// 稳定字符串表示。
     #[must_use]
-    pub const fn directory(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => ACTIVE_DIR,
             Self::Archived => ARCHIVED_DIR,
+        }
+    }
+
+    /// 存储子目录名。
+    #[must_use]
+    pub const fn directory(self) -> &'static str {
+        self.as_str()
+    }
+
+    /// 另一种持久化状态。
+    #[must_use]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Active => Self::Archived,
+            Self::Archived => Self::Active,
         }
     }
 }
 
 impl Display for SessionStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Active => ACTIVE_DIR,
-            Self::Archived => ARCHIVED_DIR,
-        };
-        f.write_str(value)
+        f.write_str(self.as_str())
     }
 }
 
