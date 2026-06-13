@@ -469,6 +469,17 @@ impl ManagedSession {
         &self.title
     }
 
+    /// 当前会话摘要。
+    #[must_use]
+    pub const fn summary(&self) -> Option<&SummarySnapshot> {
+        self.summary.as_ref()
+    }
+
+    /// 更新当前会话摘要。
+    pub fn set_summary(&mut self, summary: Option<SummarySnapshot>) {
+        self.summary = summary;
+    }
+
     /// 从当前内存状态生成磁盘会话。
     #[must_use]
     pub fn to_stored_session(&self, updated_at: String) -> StoredSession {

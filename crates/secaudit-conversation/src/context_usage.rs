@@ -147,6 +147,23 @@ impl ContextUsageEstimator {
         }
     }
 
+    #[must_use]
+    pub const fn window_tokens(&self) -> u64 {
+        self.window_tokens
+    }
+
+    #[must_use]
+    pub fn estimate_messages_tokens(&self, messages: &[ChatMessage]) -> u64 {
+        self.estimate(messages).used_tokens
+    }
+
+    #[must_use]
+    pub fn estimate_messages_tokens_uncapped(&self, messages: &[ChatMessage]) -> u64 {
+        messages.iter().fold(0u64, |total, message| {
+            total.saturating_add(self.estimate_message_tokens(message))
+        })
+    }
+
     fn estimate_message_tokens(&self, message: &ChatMessage) -> u64 {
         const MESSAGE_OVERHEAD_TOKENS: u64 = 4;
         let content_tokens = message
@@ -190,8 +207,18 @@ fn count_tiktoken_text_tokens(model: &str, text: &str) -> Option<u64> {
 }
 
 fn estimate_text_tokens_by_chars(text: &str) -> u64 {
-    let char_count = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
-    char_count.div_ceil(4)
+    let mut ascii_chars = 0u64;
+    let mut non_ascii_chars = 0u64;
+
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii_chars = ascii_chars.saturating_add(1);
+        } else {
+            non_ascii_chars = non_ascii_chars.saturating_add(1);
+        }
+    }
+
+    ascii_chars.div_ceil(4).saturating_add(non_ascii_chars)
 }
 
 fn percent(value: u64, total: u64) -> u64 {
@@ -263,5 +290,16 @@ mod tests {
             usage.token_estimator,
             ContextTokenEstimator::CharacterApproximation
         );
+    }
+
+    #[test]
+    fn character_fallback_counts_non_ascii_more_conservatively() {
+        let messages = vec![ChatMessage::user("审计这个项目")];
+
+        let usage =
+            ContextUsageEstimator::with_model(DEFAULT_CONTEXT_WINDOW_TOKENS, "unknown-model")
+                .estimate(&messages);
+
+        assert_eq!(usage.message_tokens, 10);
     }
 }

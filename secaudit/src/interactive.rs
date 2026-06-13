@@ -7,7 +7,8 @@ use std::sync::mpsc as std_mpsc;
 use secaudit_agent::state::AgentState;
 use secaudit_agent::{ChatMessage as AgentChatMessage, Role, TokenUsage};
 use secaudit_conversation::{
-    ContextUsage, ConversationConfig, ConversationService, ManagedSession, SessionListItem,
+    ContextCompressionEvent, ContextUsage, ConversationConfig, ConversationService, ManagedSession,
+    SessionListItem,
 };
 use secaudit_core::Config;
 
@@ -93,6 +94,7 @@ enum WorkerEvent {
         name: String,
         result: String,
     },
+    ContextCompaction(ContextCompressionEvent),
     ChatDone {
         response: Result<String, String>,
         message_count: usize,
@@ -117,6 +119,12 @@ enum WorkerEvent {
     SessionList {
         sessions: Result<Vec<SessionListItem>, String>,
     },
+    CompactDone {
+        compression: Option<ContextCompressionEvent>,
+        message_count: usize,
+        usage: TokenUsage,
+        context_usage: ContextUsage,
+    },
     ConfirmRequest {
         prompt: String,
         response_tx: std_mpsc::Sender<bool>,
@@ -127,6 +135,7 @@ enum WorkerEvent {
 #[derive(Debug)]
 enum WorkerCommand {
     Chat(ChatRequest),
+    Compact,
     NewSession,
     ListSessions,
     SwitchSession { selector: String },

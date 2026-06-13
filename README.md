@@ -18,7 +18,7 @@ securagent/
     ├── secaudit-tools/        # 工具系统（Tool trait + 内置工具）
     │   └── src/tools/         # read/list/search/find/write/exec/semgrep/deps/nvd
     ├── secaudit-agent/        # 推理引擎（ReAct/Reflexion + Session + Prompt + Trajectory）
-    └── secaudit-conversation/ # 会话服务、历史持久化与滑动窗口
+    └── secaudit-conversation/ # 会话服务、历史持久化、token 估算与上下文压缩
 ```
 
 ## 快速开始
@@ -63,6 +63,20 @@ just run
 ```
 
 交互模式下 Agent 拥有完整工具集（文件读写、命令执行、搜索等），可对整个项目进行多轮审计。
+
+### 会话上下文与压缩
+
+交互模式、非交互 chat、TUI 和 GUI 都复用 `secaudit-conversation` 的会话服务：
+
+- 完整原始消息历史会持久化到本地会话文件，便于恢复、归档和评估。
+- 发送给 LLM 的 active context 会按模型上下文窗口估算 token 使用量。
+- 默认在 active context 预计达到窗口 **80%** 时触发压缩，直接调用当前模型把已覆盖对话压缩成 `SummarySnapshot`，并作为 system 背景注入。
+- 摘要请求本身会按同一个模型上下文窗口选择可放入的历史片段；如果模型摘要失败，会回退到本地确定性摘要，避免主流程中断。
+- 本轮即将发送的用户消息也会参与压缩预算，避免“历史 + 当前输入”合并后才超过模型上限。
+- TUI 支持显式输入 `/compact` 立即压缩当前会话上下文。
+- GUI 和 TUI 的运行轨迹会显示 `上下文压缩` / `压缩` 事件，包含覆盖消息数和压缩前后的 token 占用。
+
+`SECAUDIT_CONTEXT_WINDOW_TOKENS` 可显式覆盖模型上下文窗口；未配置时使用默认值，支持的模型会尽量使用 tokenizer 估算，否则回退到字符近似估算。
 
 ### 非交互 chat 调试模式
 

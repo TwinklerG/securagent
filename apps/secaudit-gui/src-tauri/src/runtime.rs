@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use secaudit_agent::{Agent, ChatMessage, Role, TokenUsage};
 use secaudit_conversation::{
-    ConversationConfig, ConversationService, ManagedSession, SessionListItem,
-    SessionManagementInfo, SessionPreviewRole, SessionStatus,
+    ContextCompressionEvent, ConversationConfig, ConversationService, ManagedSession,
+    SessionListItem, SessionManagementInfo, SessionPreviewRole, SessionStatus,
 };
 use secaudit_core::Config;
 use tauri::{AppHandle, Emitter};
@@ -400,7 +400,14 @@ impl GuiRuntime {
         self.run_phase = self.current_idle_run_phase();
 
         match chat_result {
-            Ok(_response) => {
+            Ok(outcome) => {
+                if let Some(compression) = outcome.compression {
+                    self.push_trace(
+                        TraceEventKind::ContextCompaction,
+                        "上下文压缩",
+                        &context_compression_detail(&compression),
+                    );
+                }
                 self.push_trace(
                     TraceEventKind::State,
                     "审计轮次完成",
@@ -580,6 +587,19 @@ fn ready_run_panel() -> RunPanel {
         pending_label: RUN_PENDING_LABEL.to_owned(),
         pending_detail: RUN_PENDING_DETAIL.to_owned(),
     }
+}
+
+fn context_compression_detail(event: &ContextCompressionEvent) -> String {
+    format!(
+        "已压缩较早的 {} 条消息，context: {} / {} tokens ({}%) -> {} / {} tokens ({}%)。",
+        event.covered_message_count,
+        event.before_used_tokens,
+        event.window_tokens,
+        event.before_used_percent,
+        event.after_used_tokens,
+        event.window_tokens,
+        event.after_used_percent,
+    )
 }
 
 fn running_run_panel() -> RunPanel {

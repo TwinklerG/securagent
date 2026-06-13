@@ -21,6 +21,7 @@ pub enum Command {
     Status,
     Usage,
     Context,
+    Compact,
     Tools,
     Skills,
     Exit,
@@ -41,6 +42,7 @@ pub fn parse(input: &str) -> UserInput {
         "/status" => Some(Command::Status),
         "/usage" => Some(Command::Usage),
         "/context" => Some(Command::Context),
+        "/compact" => Some(Command::Compact),
         "/tools" => Some(Command::Tools),
         "/skills" => Some(Command::Skills),
         "/exit" => Some(Command::Exit),
@@ -127,5 +129,6 @@ mod tests {
         assert_eq!(parse("/status"), UserInput::Command(Command::Status));
         assert_eq!(parse("/usage"), UserInput::Command(Command::Usage));
         assert_eq!(parse("/context"), UserInput::Command(Command::Context));
+        assert_eq!(parse("/compact"), UserInput::Command(Command::Compact));
     }
 }

@@ -22,15 +22,14 @@ impl SlidingWindowPolicy {
         if self.max_context_messages == 0 {
             return messages
                 .iter()
-                .find(|message| matches!(message.role, Role::System))
+                .filter(|message| matches!(message.role, Role::System))
                 .cloned()
-                .into_iter()
                 .collect();
         }
 
         let system = messages
             .iter()
-            .find(|message| matches!(message.role, Role::System))
+            .filter(|message| matches!(message.role, Role::System))
             .cloned();
 
         let mut non_system: Vec<ChatMessage> = messages
@@ -51,7 +50,7 @@ impl SlidingWindowPolicy {
             non_system.remove(0);
         }
 
-        system.into_iter().chain(non_system).collect()
+        system.chain(non_system).collect()
     }
 }
 
@@ -126,6 +125,30 @@ mod tests {
             view.first().map(|msg| &msg.role),
             Some(Role::System)
         ));
+    }
+
+    #[test]
+    fn keeps_all_system_messages() {
+        let messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("u1"),
+            ChatMessage::system("summary"),
+            ChatMessage::user("u2"),
+        ];
+
+        let view = SlidingWindowPolicy::new(1).apply(&messages);
+
+        assert_eq!(view.len(), 3);
+        assert_eq!(
+            view.iter()
+                .filter(|message| matches!(message.role, Role::System))
+                .count(),
+            2
+        );
+        assert_eq!(
+            view.last().and_then(|message| message.content.as_deref()),
+            Some("u2")
+        );
     }
 
     #[test]

@@ -43,7 +43,7 @@ let resizeStartX = 0;
 let resizeStartWidth = 0;
 
 type OpsTabId = "status" | "trace" | "confirm" | "tools" | "findings";
-type TraceFilterId = "all" | "state" | "tool" | "error";
+type TraceFilterId = "all" | "state" | "tool" | "compact" | "error";
 type StatusMetric = {
   label: string;
   value: string;
@@ -110,6 +110,7 @@ const TRACE_KIND_LABEL_BY_VALUE: Record<TraceEvent["kind"], string> = {
   tool_call: "调用",
   tool_confirm: "确认",
   tool_result: "结果",
+  context_compaction: "压缩",
   error: "错误",
 };
 const TRACE_KIND_BADGE_BASE =
@@ -121,6 +122,7 @@ const TRACE_KIND_BADGE_CLASS_BY_VALUE: Record<TraceEvent["kind"], string> = {
   tool_call: "border-[#b8cec1] bg-[#e5efe7] text-[#2f765e]",
   tool_confirm: "border-[#e1c27c] bg-[#fff1d5] text-[#805100]",
   tool_result: "border-[#b8c8d5] bg-[#e4ecf2] text-[#365d78]",
+  context_compaction: "border-[#b6c7d9] bg-[#e9f0f7] text-[#385f7f]",
   error: "border-[#d8847b] bg-[#fff1ee] text-[#9b2d25]",
 };
 const TOOL_CONFIRM_STATUS_LABEL_BY_ID: Record<ToolConfirmStatusId, string> = {
@@ -169,7 +171,7 @@ const TRACE_FILTERS: Array<{
   {
     id: "all",
     label: "全部",
-    kinds: ["state", "tool_call", "tool_confirm", "tool_result", "error"],
+    kinds: ["state", "tool_call", "tool_confirm", "tool_result", "context_compaction", "error"],
   },
   {
     id: "state",
@@ -180,6 +182,11 @@ const TRACE_FILTERS: Array<{
     id: "tool",
     label: "工具",
     kinds: ["tool_call", "tool_confirm", "tool_result"],
+  },
+  {
+    id: "compact",
+    label: "压缩",
+    kinds: ["context_compaction"],
   },
   {
     id: "error",
@@ -282,6 +289,7 @@ const filteredTraceSummaryLabel = computed(
 const traceSummary = computed(() => ({
   total: props.trace.length,
   tool: countTraceByKinds(["tool_call", "tool_confirm", "tool_result"]),
+  compact: countTraceByKinds(["context_compaction"]),
   error: countTraceByKinds(["error"]),
 }));
 
@@ -430,6 +438,7 @@ function traceItemClass(item: TraceEvent): string {
     tool_call: "border-l-[#2f765e]",
     tool_confirm: "border-l-[#c58a1a]",
     tool_result: "border-l-[#5d6d7d]",
+    context_compaction: "border-l-[#4f7ea1]",
     error: "border-l-[#b04435]",
   } satisfies Record<TraceEvent["kind"], string>;
 
@@ -825,7 +834,7 @@ function findingStatusClass(status: FindingPreview["status"]): string {
         </span>
       </div>
       <div
-        class="mb-2.5 grid grid-cols-3 gap-1.5 rounded-lg border border-[rgba(39,48,40,0.12)] bg-[rgba(255,252,244,0.66)] p-2 text-center"
+        class="mb-2.5 grid grid-cols-4 gap-1.5 rounded-lg border border-[rgba(39,48,40,0.12)] bg-[rgba(255,252,244,0.66)] p-2 text-center"
         data-testid="trace-summary"
       >
         <span class="grid gap-0.5 text-[11px] font-bold text-[#667166]">
@@ -837,11 +846,15 @@ function findingStatusClass(status: FindingPreview["status"]): string {
           工具
         </span>
         <span class="grid gap-0.5 text-[11px] font-bold text-[#667166]">
+          <strong class="text-sm font-black text-[#385f7f] tabular-nums">{{ traceSummary.compact }}</strong>
+          压缩
+        </span>
+        <span class="grid gap-0.5 text-[11px] font-bold text-[#667166]">
           <strong class="text-sm font-black text-[#9b2d25] tabular-nums">{{ traceSummary.error }}</strong>
           错误
         </span>
       </div>
-      <div class="mb-2.5 grid grid-cols-4 gap-1.5" data-testid="trace-filters">
+      <div class="mb-2.5 grid grid-cols-5 gap-1.5" data-testid="trace-filters">
         <button
           v-for="filter in traceFilters"
           :key="filter.id"

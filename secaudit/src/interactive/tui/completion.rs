@@ -1,6 +1,6 @@
 //! TUI 命令补全规则。
 
-const COMMAND_CANDIDATES: [&str; 11] = [
+const COMMAND_CANDIDATES: [&str; 12] = [
     "/help",
     "/new",
     "/clear",
@@ -9,6 +9,7 @@ const COMMAND_CANDIDATES: [&str; 11] = [
     "/status",
     "/usage",
     "/context",
+    "/compact",
     "/tools",
     "/skills",
     "/exit",

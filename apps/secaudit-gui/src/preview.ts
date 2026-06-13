@@ -255,6 +255,11 @@ export function createPreviewAgentEvents(request: string): Array<AgentEvent> {
       },
     }),
     createPreviewAgentEvent(
+      "context_compaction",
+      "上下文压缩",
+      "已压缩较早的 18 条消息，context: 102400 / 128000 tokens (80%) -> 76800 / 128000 tokens (60%)。",
+    ),
+    createPreviewAgentEvent(
       "tool_confirm",
       "工具确认请求",
       `${PREVIEW_APPROVAL_PROMPT}\n\n等待用户确认。`,

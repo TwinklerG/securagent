@@ -304,8 +304,18 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
             .chat(&mut agent, &mut managed_session, user_message)
             .await
         {
-            Ok(message) => {
+            Ok(outcome) => {
                 let duration_ms = turn_start.elapsed().as_millis() as u64;
+                let message = outcome.response;
+                if let Some(compression) = outcome.compression {
+                    eprintln!(
+                        "{}: 已压缩较早的 {} 条消息，{}% -> {}% context。",
+                        "上下文压缩".cyan().bold(),
+                        compression.covered_message_count,
+                        compression.before_used_percent,
+                        compression.after_used_percent
+                    );
+                }
                 final_message.clone_from(&message);
                 turns.push(TurnRecord::success(
                     index + 1,

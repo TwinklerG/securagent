@@ -53,6 +53,7 @@ pub(super) enum EventKind {
     State,
     ToolCall,
     ToolResult,
+    ContextCompaction,
     System,
     Error,
 }
@@ -63,6 +64,7 @@ impl EventKind {
             Self::State => "STATE",
             Self::ToolCall => "TOOL",
             Self::ToolResult => "RESULT",
+            Self::ContextCompaction => "压缩",
             Self::System => "INFO",
             Self::Error => "ERROR",
         }
@@ -73,6 +75,7 @@ impl EventKind {
             Self::State => Style::default().fg(Color::Black).bg(Color::Magenta),
             Self::ToolCall => Style::default().fg(Color::Black).bg(Color::Blue),
             Self::ToolResult => Style::default().fg(Color::Black).bg(Color::Gray),
+            Self::ContextCompaction => Style::default().fg(Color::Black).bg(Color::LightCyan),
             Self::System => Style::default().fg(Color::Black).bg(Color::Cyan),
             Self::Error => Style::default().fg(Color::White).bg(Color::Red),
         }
@@ -84,6 +87,7 @@ impl EventKind {
             Self::Error => Style::default().fg(Color::LightRed),
             Self::State => Style::default().fg(Color::LightMagenta),
             Self::ToolCall => Style::default().fg(Color::LightBlue),
+            Self::ContextCompaction => Style::default().fg(Color::LightCyan),
             Self::System | Self::ToolResult => Style::default().fg(Color::White),
         }
     }
@@ -144,6 +148,11 @@ impl EventEntry {
             kind,
             text,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn kind_badge(&self) -> &'static str {
+        self.kind.badge()
     }
 
     pub(super) fn render_line(&self) -> Line<'static> {

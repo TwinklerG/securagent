@@ -26,6 +26,15 @@ pub enum Error {
     #[error("空会话不会持久化：{session_id}")]
     EmptySession { session_id: String },
 
+    /// 即将发送给 LLM 的上下文超过模型窗口。
+    #[error(
+        "上下文超过模型窗口：预计 {used_tokens} / {window_tokens} tokens，请缩短当前输入或先压缩历史"
+    )]
+    ContextTooLarge {
+        used_tokens: u64,
+        window_tokens: u64,
+    },
+
     /// JSON 序列化或解析失败。
     #[error("JSON 处理失败：{0}")]
     Json(#[from] serde_json::Error),

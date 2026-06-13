@@ -224,6 +224,17 @@ impl Agent {
             .unwrap_or_default()
     }
 
+    /// 使用当前模型压缩较早上下文。
+    ///
+    /// 调用方负责保证 `prompt` 已按当前模型上下文窗口预算裁剪。
+    ///
+    /// # Errors
+    ///
+    /// LLM 生成失败时返回 [`Error::Llm`]。
+    pub async fn summarize_context(&self, prompt: &str) -> Result<String, Error> {
+        self.llm.generate(prompt).await.map_err(Error::from)
+    }
+
     /// 将匹配的 Skill 注入为本轮 Agent 输入；未匹配时保持原始用户输入。
     fn build_agent_input(&self, user_message: &str, session_id: &str) -> String {
         self.skill_registry
@@ -251,14 +262,42 @@ impl Agent {
         session: &mut Session,
         user_message: &str,
     ) -> Result<String, Error> {
+        self.ensure_chat_system_prompt(session);
+        let agent_input = self.build_chat_agent_input(user_message, &session.id);
+        self.chat_with_agent_input(session, user_message, agent_input)
+            .await
+    }
+
+    /// Ensure the chat system prompt exists before budgeting or execution.
+    pub fn ensure_chat_system_prompt(&self, session: &mut Session) {
         // 首次对话注入 system prompt
         if session.messages().is_empty() {
             let system_prompt = prompt::chat_system_prompt(&self.work_dir);
             session.push_message(ChatMessage::system(system_prompt));
         }
+    }
 
-        let agent_input = self.build_agent_input(user_message, &session.id);
+    /// Build the actual user message that will be sent to the LLM for this turn.
+    #[must_use]
+    pub fn build_chat_agent_input(&self, user_message: &str, session_id: &str) -> String {
+        self.build_agent_input(user_message, session_id)
+    }
 
+    /// Execute one chat turn using a caller-prepared Agent input.
+    ///
+    /// This lets upstream context budgeting use the exact message that will be sent to the LLM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the LLM call fails, tool arguments cannot be parsed, or agent
+    /// execution otherwise fails.
+    pub async fn chat_with_agent_input(
+        &mut self,
+        session: &mut Session,
+        user_message: &str,
+        agent_input: String,
+    ) -> Result<String, Error> {
+        self.ensure_chat_system_prompt(session);
         // 追加原始用户消息，保持会话历史与界面展示一致。
         session.push_message(ChatMessage::user(user_message));
 

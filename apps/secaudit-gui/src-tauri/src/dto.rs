@@ -371,6 +371,7 @@ pub(crate) enum TraceEventKind {
     ToolCall,
     ToolConfirm,
     ToolResult,
+    ContextCompaction,
     Error,
 }
 

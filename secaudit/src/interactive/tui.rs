@@ -35,7 +35,7 @@ use secaudit_agent::Agent;
 use secaudit_agent::TokenUsage;
 use secaudit_agent::llm::fetch_context_window;
 use secaudit_agent::state::AgentState;
-use secaudit_conversation::{ContextUsage, SessionListItem};
+use secaudit_conversation::{ContextCompressionEvent, ContextUsage, SessionListItem};
 use secaudit_core::Config;
 use tokio::sync::mpsc;
 
@@ -64,7 +64,7 @@ const KEY_CTRL_D: char = 'd';
 const DEFAULT_VIEWPORT_HEIGHT: u16 = 10;
 
 const WELCOME_MSG: &str = "secaudit -- 安全代码审计 Agent（TUI）";
-const HELP_HINT: &str = "输入审计指令后回车，命令：/help /new /sessions /session <id|序号> /status /tools /exit，Ctrl+D 退出";
+const HELP_HINT: &str = "输入审计指令后回车，命令：/help /new /sessions /session <id|序号> /status /compact /tools /exit，Ctrl+D 退出";
 
 const FOOTER_HINT: &str =
     "F1 帮助  Ctrl+L 事件面板  Ctrl+J/K 事件滚动  Tab 补全  Ctrl+P/N 历史  Enter 发送  Ctrl+D 退出";
@@ -92,6 +92,7 @@ const HELP_TEXT: &[&str] = &[
     "  /status        显示当前状态",
     "  /usage         显示 Token 用量",
     "  /context       显示上下文占用",
+    "  /compact       立即压缩当前会话上下文",
     "  /tools         列出工具",
     "  /skills        列出可用 Skills",
     "  /exit          退出",
@@ -365,6 +366,10 @@ impl TuiApp {
         self.push_event(EventKind::ToolResult, format!("{name} -> {summary}"));
     }
 
+    fn push_context_compaction(&mut self, event: &ContextCompressionEvent) {
+        self.push_event(EventKind::ContextCompaction, context_compaction_text(event));
+    }
+
     fn push_event(&mut self, kind: EventKind, text: String) {
         self.events.push(EventEntry::new(kind, text));
 
@@ -625,10 +630,10 @@ impl TuiApp {
             self.model.clone()
         };
         let tokens_display = format!(
-            "{}",
-            self.displayed_cumulative_usage
-                .prompt_tokens
-                .saturating_add(self.displayed_cumulative_usage.completion_tokens),
+            "{} / {} ({}%)",
+            self.context_usage.used_tokens,
+            self.context_usage.window_tokens,
+            self.context_usage.used_percent(),
         );
         let context_display = format!("{} messages", self.message_count);
         let metrics = Paragraph::new(vec![
@@ -1153,6 +1158,19 @@ fn percent_tenths(value: u64, total: u64) -> u64 {
     value.saturating_mul(1_000).checked_div(total).unwrap_or(0)
 }
 
+fn context_compaction_text(event: &ContextCompressionEvent) -> String {
+    format!(
+        "已压缩较早的 {} 条消息，context: {} / {} tokens ({}%) -> {} / {} tokens ({}%)。",
+        event.covered_message_count,
+        event.before_used_tokens,
+        event.window_tokens,
+        event.before_used_percent,
+        event.after_used_tokens,
+        event.window_tokens,
+        event.after_used_percent,
+    )
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
 }
@@ -1330,10 +1348,23 @@ async fn run_worker(
         match command {
             WorkerCommand::Chat(request) => {
                 let previous_usage = TokenUsage::sum_from_messages(session.session().messages());
+                let compaction_tx = event_tx.clone();
                 let response = conversation
-                    .chat(&mut agent, &mut session, &request.input)
+                    .chat_with_compression_callback(
+                        &mut agent,
+                        &mut session,
+                        &request.input,
+                        move |compression| {
+                            let _ = compaction_tx
+                                .send(WorkerEvent::ContextCompaction(compression.clone()));
+                        },
+                    )
                     .await
                     .map_err(|e| format!("{e}"));
+                let response = match response {
+                    Ok(outcome) => Ok(outcome.response),
+                    Err(error) => Err(error),
+                };
 
                 let usage = TokenUsage::sum_from_messages(session.session().messages());
                 let last_turn_usage = TokenUsage {
@@ -1369,6 +1400,19 @@ async fn run_worker(
                     }
                 }
             }
+            WorkerCommand::Compact => match conversation.compact(&agent, &mut session).await {
+                Ok(outcome) => {
+                    let _ = event_tx.send(WorkerEvent::CompactDone {
+                        compression: outcome.compression,
+                        message_count: session.session().messages().len(),
+                        usage: TokenUsage::sum_from_messages(session.session().messages()),
+                        context_usage: conversation.active_context_usage(&session),
+                    });
+                }
+                Err(error) => {
+                    let _ = event_tx.send(WorkerEvent::Error(format!("上下文压缩失败：{error}")));
+                }
+            },
             WorkerCommand::ListSessions => {
                 let sessions = conversation
                     .list_sessions_with_preview(work_dir.as_path())
@@ -1453,6 +1497,7 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             }
             WorkerEvent::ToolCall { name, args } => app.push_tool_call(&name, &args),
             WorkerEvent::ToolResult { name, result } => app.push_tool_result(&name, &result),
+            WorkerEvent::ContextCompaction(event) => app.push_context_compaction(&event),
             WorkerEvent::ChatDone {
                 response,
                 message_count,
@@ -1509,6 +1554,24 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
                 Ok(sessions) => app.show_sessions(&sessions),
                 Err(error) => app.push_error(&format!("会话列表读取失败：{error}")),
             },
+            WorkerEvent::CompactDone {
+                compression,
+                message_count,
+                usage,
+                context_usage,
+            } => {
+                app.busy = false;
+                app.message_count = message_count;
+                app.cumulative_usage = usage;
+                app.last_turn_usage = TokenUsage::default();
+                app.sync_usage_display();
+                app.context_usage = context_usage;
+                if let Some(event) = compression {
+                    app.push_context_compaction(&event);
+                } else {
+                    app.push_system("当前会话没有可压缩的对话历史。");
+                }
+            }
             WorkerEvent::ConfirmRequest {
                 prompt,
                 response_tx,
@@ -1789,6 +1852,14 @@ fn handle_command(
         }
         Command::Usage => app.open_usage_overlay(),
         Command::Context => app.open_context_overlay(),
+        Command::Compact => {
+            if command_tx.send(WorkerCommand::Compact).is_err() {
+                app.push_error("无法发送压缩请求到 Agent 线程。");
+            } else {
+                app.busy = true;
+                app.push_system("正在压缩当前会话上下文...");
+            }
+        }
         Command::Tools => app.show_tools(),
         Command::Skills => app.show_skills(),
         Command::Exit => app.should_quit = true,
@@ -1802,6 +1873,7 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use secaudit_agent::TokenUsage;
+    use secaudit_conversation::ContextCompressionEvent;
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::{
@@ -1979,6 +2051,32 @@ mod tests {
         assert_eq!(
             app.events.len(),
             initial_event_count + MAX_WORKER_EVENTS_PER_TICK + 10
+        );
+    }
+
+    #[test]
+    fn context_compaction_event_is_shown_in_event_panel() {
+        let mut app = TuiApp::new(PathBuf::from("."));
+        let (tx, mut rx) = unbounded_channel();
+
+        tx.send(WorkerEvent::ContextCompaction(ContextCompressionEvent {
+            covered_message_count: 18,
+            before_used_tokens: 102_400,
+            before_used_percent: 80,
+            after_used_tokens: 76_800,
+            after_used_percent: 60,
+            window_tokens: 128_000,
+            updated_at: "now".to_owned(),
+        }))
+        .expect("send context compaction event");
+
+        process_worker_events(&mut app, &mut rx);
+
+        let event = app.events.last().expect("event should be recorded");
+        assert_eq!(event.kind_badge(), "压缩");
+        assert_eq!(
+            event.text,
+            "已压缩较早的 18 条消息，context: 102400 / 128000 tokens (80%) -> 76800 / 128000 tokens (60%)。"
         );
     }
 
