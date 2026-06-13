@@ -4,6 +4,10 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, HttpLlmClient, TokenUsage, ToolCallResponse, ToolDefinition};
 use crate::tools::Tool;
 
+const MAX_TOOL_RESULT_CHARS: usize = 20_000;
+const TOOL_RESULT_TRUNCATED: &str =
+    "\n\n[工具结果已截断，输出过长。请缩小路径、降低递归深度或使用更精确的搜索。]";
+
 /// `ReAct` 单步执行结果
 pub enum StepResult {
     /// LLM 请求了工具调用
@@ -130,6 +134,8 @@ impl<'a> ReActExecutor<'a> {
                 ),
             };
 
+            let result = truncate_tool_result(&result);
+
             self.messages
                 .push(ChatMessage::tool_result(&call.id, &result));
             results.push((call.function.name.clone(), result));
@@ -143,6 +149,19 @@ impl<'a> ReActExecutor<'a> {
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
+}
+
+fn truncate_tool_result(result: &str) -> String {
+    if result.chars().count() <= MAX_TOOL_RESULT_CHARS {
+        return result.to_owned();
+    }
+
+    let mut truncated = result
+        .chars()
+        .take(MAX_TOOL_RESULT_CHARS)
+        .collect::<String>();
+    truncated.push_str(TOOL_RESULT_TRUNCATED);
+    truncated
 }
 
 pub(crate) fn tool_definitions_from_tools(tools: &[Box<dyn Tool>]) -> Vec<ToolDefinition> {
@@ -160,7 +179,10 @@ pub(crate) fn tool_definitions_from_tools(tools: &[Box<dyn Tool>]) -> Vec<ToolDe
 mod tests {
     use crate::llm::{ChatMessage, FunctionCall, Role, ToolCallResponse};
 
-    use super::{StepResult, step_result_from_response};
+    use super::{
+        MAX_TOOL_RESULT_CHARS, StepResult, TOOL_RESULT_TRUNCATED, step_result_from_response,
+        truncate_tool_result,
+    };
 
     #[test]
     fn response_with_tool_calls_becomes_tool_step() {
@@ -209,5 +231,15 @@ mod tests {
                 panic!("expected text response, got {} tool calls", calls.len());
             }
         }
+    }
+
+    #[test]
+    fn truncates_large_tool_results() {
+        let result = "x".repeat(MAX_TOOL_RESULT_CHARS + 100);
+
+        let truncated = truncate_tool_result(&result);
+
+        assert!(truncated.chars().count() < result.chars().count());
+        assert!(truncated.ends_with(TOOL_RESULT_TRUNCATED));
     }
 }

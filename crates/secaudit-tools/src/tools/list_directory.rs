@@ -27,6 +27,8 @@ const PARAM_MAX_DEPTH: &str = "max_depth";
 
 /// 默认最大递归深度
 const DEFAULT_MAX_DEPTH: usize = 3;
+const MAX_ENTRIES: usize = 2_000;
+const MAX_OUTPUT_CHARS: usize = 20_000;
 
 /// 每层缩进空格数
 const INDENT_SPACES: usize = 2;
@@ -155,19 +157,76 @@ async fn list_recursive(
     output: &mut String,
     depth: usize,
     max_depth: usize,
+    state: &mut ListState,
 ) -> Result<(), Error> {
+    if state.done() {
+        return Ok(());
+    }
+
     let entries = read_sorted_entries(dir).await?;
 
     for entry in &entries {
-        let _ = writeln!(output, "{}", format_entry(entry, depth));
+        if state.done() {
+            break;
+        }
+
+        state.push_line(output, &format_entry(entry, depth));
 
         if entry.is_dir && depth < max_depth {
             // 使用 Box::pin 避免异步递归的 size 问题
-            Box::pin(list_recursive(&entry.path, output, depth + 1, max_depth)).await?;
+            Box::pin(list_recursive(
+                &entry.path,
+                output,
+                depth + 1,
+                max_depth,
+                state,
+            ))
+            .await?;
         }
     }
 
     Ok(())
+}
+
+struct ListState {
+    entries: usize,
+}
+
+impl ListState {
+    const fn new() -> Self {
+        Self { entries: 0 }
+    }
+
+    fn done(&self) -> bool {
+        self.entries >= MAX_ENTRIES
+    }
+
+    fn push_line(&mut self, output: &mut String, line: &str) {
+        if self.done() {
+            return;
+        }
+        let _ = writeln!(output, "{line}");
+        self.entries = self.entries.saturating_add(1);
+    }
+}
+
+fn truncate_output(output: &str, entries: usize) -> String {
+    let mut result = if output.chars().count() > MAX_OUTPUT_CHARS {
+        let mut truncated = output.chars().take(MAX_OUTPUT_CHARS).collect::<String>();
+        truncated.push_str("\n\n[目录输出已截断，输出过长。请缩小路径或降低递归深度。]");
+        truncated
+    } else {
+        output.to_owned()
+    };
+
+    if entries >= MAX_ENTRIES {
+        let _ = write!(
+            result,
+            "\n\n[目录输出已达到条目上限 {MAX_ENTRIES}，请缩小路径或降低递归深度。]"
+        );
+    }
+
+    result
 }
 
 #[async_trait]
@@ -225,13 +284,14 @@ impl Tool for ListDirectory {
             .map_or(DEFAULT_MAX_DEPTH, |v| v as usize);
 
         let mut output = String::new();
+        let mut state = ListState::new();
 
         if recursive {
-            list_recursive(&resolved, &mut output, 0, max_depth).await?;
+            list_recursive(&resolved, &mut output, 0, max_depth, &mut state).await?;
         } else {
             let entries = read_sorted_entries(&resolved).await?;
             for entry in &entries {
-                let _ = writeln!(output, "{}", format_entry(entry, 0));
+                state.push_line(&mut output, &format_entry(entry, 0));
             }
         }
 
@@ -239,7 +299,7 @@ impl Tool for ListDirectory {
             return Ok(format!("目录为空：{path_str}"));
         }
 
-        Ok(output)
+        Ok(truncate_output(&output, state.entries))
     }
 }
 

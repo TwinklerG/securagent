@@ -29,7 +29,9 @@ const PARAM_LIMIT: &str = "limit";
 const DEFAULT_OFFSET: usize = 1;
 
 /// 默认读取行数
-const DEFAULT_LIMIT: usize = 2000;
+const DEFAULT_LIMIT: usize = 400;
+const MAX_LIMIT: usize = 1_000;
+const MAX_OUTPUT_CHARS: usize = 20_000;
 
 /// 行号显示宽度
 const LINE_NUMBER_WIDTH: usize = 6;
@@ -82,7 +84,17 @@ fn format_lines(lines: &[&str], offset: usize, limit: usize) -> String {
         );
     }
 
-    output
+    truncate_output(&output)
+}
+
+fn truncate_output(output: &str) -> String {
+    if output.chars().count() <= MAX_OUTPUT_CHARS {
+        return output.to_owned();
+    }
+
+    let mut truncated = output.chars().take(MAX_OUTPUT_CHARS).collect::<String>();
+    truncated.push_str("\n\n[文件输出已截断，输出过长。请使用 offset/limit 读取更小范围。]");
+    truncated
 }
 
 #[async_trait]
@@ -109,7 +121,7 @@ impl Tool for ReadFile {
                 },
                 PARAM_LIMIT: {
                     "type": "integer",
-                    "description": "读取行数（默认 2000）"
+                    "description": "读取行数（默认 400，最大 1000）"
                 }
             },
             "required": [PARAM_PATH]
@@ -142,7 +154,7 @@ impl Tool for ReadFile {
         let limit = params
             .get(PARAM_LIMIT)
             .and_then(Value::as_u64)
-            .map_or(DEFAULT_LIMIT, |v| v.max(1) as usize);
+            .map_or(DEFAULT_LIMIT, |v| (v.max(1) as usize).min(MAX_LIMIT));
 
         let lines: Vec<&str> = content.lines().collect();
 
