@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use super::sandbox::resolve_existing_path;
+use super::sandbox::{SensitivePathPolicy, resolve_existing_path};
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -51,13 +51,25 @@ const MSG_MISSING_PATH: &str = "缺少 path 参数";
 pub struct ListDirectory {
     /// 沙箱工作目录
     work_dir: PathBuf,
+    sensitive_paths: SensitivePathPolicy,
 }
 
 impl ListDirectory {
     /// 创建实例，`work_dir` 为沙箱根目录。
     #[must_use]
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self::with_sensitive_path_policy(work_dir, SensitivePathPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            sensitive_paths,
+        }
     }
 }
 
@@ -76,7 +88,10 @@ struct DirEntry {
 }
 
 /// 读取并排序目录条目：目录在前、文件在后，各自按名称字母序排列。
-async fn read_sorted_entries(dir: &Path) -> Result<Vec<DirEntry>, Error> {
+async fn read_sorted_entries(
+    dir: &Path,
+    sensitive_paths: &SensitivePathPolicy,
+) -> Result<Vec<DirEntry>, Error> {
     let mut reader = fs::read_dir(dir)
         .await
         .map_err(|e| Error::Tool(format!("读取目录失败「{}」：{e}", dir.display())))?;
@@ -97,6 +112,11 @@ async fn read_sorted_entries(dir: &Path) -> Result<Vec<DirEntry>, Error> {
             .map_err(|e| Error::Tool(format!("获取文件类型失败：{e}")))?;
 
         let raw_name = entry.file_name().to_string_lossy().into_owned();
+        if sensitive_paths.has_sensitive_component(Path::new(&raw_name))
+            || sensitive_paths.has_sensitive_component(&entry.path())
+        {
+            continue;
+        }
 
         let is_dir = file_type.is_dir();
         let is_symlink = file_type.is_symlink();
@@ -158,12 +178,13 @@ async fn list_recursive(
     depth: usize,
     max_depth: usize,
     state: &mut ListState,
+    sensitive_paths: &SensitivePathPolicy,
 ) -> Result<(), Error> {
     if state.done() {
         return Ok(());
     }
 
-    let entries = read_sorted_entries(dir).await?;
+    let entries = read_sorted_entries(dir, sensitive_paths).await?;
 
     for entry in &entries {
         if state.done() {
@@ -180,6 +201,7 @@ async fn list_recursive(
                 depth + 1,
                 max_depth,
                 state,
+                sensitive_paths,
             ))
             .await?;
         }
@@ -260,7 +282,28 @@ impl Tool for ListDirectory {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let path_str = params
+            .get(PARAM_PATH)
+            .and_then(Value::as_str)
+            .ok_or_else(|| MSG_MISSING_PATH.to_owned())?;
+
+        let resolved =
+            resolve_existing_path(&self.work_dir, path_str).map_err(|e| e.to_string())?;
+
+        if !resolved.is_dir() {
+            return Err(format!("路径不是目录：{}", resolved.display()));
+        }
+        if self.sensitive_paths.has_sensitive_component(&resolved) {
+            return Err(format!("拒绝列出敏感目录：{}", resolved.display()));
+        }
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let path_str = params
             .get(PARAM_PATH)
             .and_then(Value::as_str)
@@ -287,9 +330,17 @@ impl Tool for ListDirectory {
         let mut state = ListState::new();
 
         if recursive {
-            list_recursive(&resolved, &mut output, 0, max_depth, &mut state).await?;
+            list_recursive(
+                &resolved,
+                &mut output,
+                0,
+                max_depth,
+                &mut state,
+                &self.sensitive_paths,
+            )
+            .await?;
         } else {
-            let entries = read_sorted_entries(&resolved).await?;
+            let entries = read_sorted_entries(&resolved, &self.sensitive_paths).await?;
             for entry in &entries {
                 state.push_line(&mut output, &format_entry(entry, 0));
             }

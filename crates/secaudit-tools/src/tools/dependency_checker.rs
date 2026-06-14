@@ -4,11 +4,13 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::error::Error;
 use crate::tools::Tool;
+
+use super::sandbox::{SensitivePathPolicy, resolve_existing_path};
 
 // —— 参数字段名 ——
 
@@ -32,7 +34,34 @@ const CMD_NPM: &str = "npm";
 const CMD_PIP_AUDIT: &str = "pip-audit";
 
 /// 依赖漏洞检查工具
-pub struct DependencyChecker;
+pub struct DependencyChecker {
+    work_dir: PathBuf,
+    sensitive_paths: SensitivePathPolicy,
+}
+
+impl DependencyChecker {
+    #[must_use]
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self::with_sensitive_path_policy(work_dir, SensitivePathPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            sensitive_paths,
+        }
+    }
+}
+
+impl Default for DependencyChecker {
+    fn default() -> Self {
+        Self::new(PathBuf::from("."))
+    }
+}
 
 /// 运行外部审计命令，返回输出文本。
 async fn run_audit(program: &str, args: &[&str], dir: &Path) -> Result<String, Error> {
@@ -93,13 +122,32 @@ impl Tool for DependencyChecker {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let project_path = params
+            .get(PARAM_PROJECT_PATH)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "缺少 project_path 参数".to_owned())?;
+
+        let dir = resolve_existing_path(&self.work_dir, project_path).map_err(|e| e.to_string())?;
+        if !dir.is_dir() {
+            return Err(format!("路径不存在或不是目录：{project_path}"));
+        }
+        if self.sensitive_paths.has_sensitive_component(&dir) {
+            return Err(format!("拒绝扫描敏感目录：{}", dir.display()));
+        }
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let project_path = params
             .get(PARAM_PROJECT_PATH)
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("缺少 project_path 参数".into()))?;
 
-        let dir = Path::new(project_path);
+        let dir = resolve_existing_path(&self.work_dir, project_path)?;
         if !dir.is_dir() {
             return Err(Error::Tool(format!("路径不存在或不是目录：{project_path}")));
         }
@@ -108,7 +156,7 @@ impl Tool for DependencyChecker {
 
         // 检测 Rust 项目
         if dir.join(CARGO_LOCK).exists() {
-            let output = run_audit(CMD_CARGO, &["audit", "--json"], dir).await?;
+            let output = run_audit(CMD_CARGO, &["audit", "--json"], &dir).await?;
             results.push(json!({
                 "ecosystem": "rust",
                 "tool": "cargo audit",
@@ -118,7 +166,7 @@ impl Tool for DependencyChecker {
 
         // 检测 Node.js 项目
         if dir.join(PACKAGE_LOCK).exists() {
-            let output = run_audit(CMD_NPM, &["audit", "--json"], dir).await?;
+            let output = run_audit(CMD_NPM, &["audit", "--json"], &dir).await?;
             results.push(json!({
                 "ecosystem": "nodejs",
                 "tool": "npm audit",
@@ -131,7 +179,7 @@ impl Tool for DependencyChecker {
             let output = run_audit(
                 CMD_PIP_AUDIT,
                 &["--format", "json", "-r", REQUIREMENTS_TXT],
-                dir,
+                &dir,
             )
             .await?;
             results.push(json!({

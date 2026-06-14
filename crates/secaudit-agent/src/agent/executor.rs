@@ -1,4 +1,9 @@
 // ReAct 循环执行器
+use std::fmt::Display;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use tokio::time::sleep;
 
 use crate::error::Error;
 use crate::llm::{ChatMessage, HttpLlmClient, TokenUsage, ToolCallResponse, ToolDefinition};
@@ -36,12 +41,153 @@ pub struct ReActExecutor<'a> {
     tool_defs: Vec<ToolDefinition>,
     /// 对话历史
     messages: Vec<ChatMessage>,
+    /// LLM 调用重试与熔断策略
+    llm_policy: LlmCallPolicy,
+}
+
+/// LLM 调用重试与熔断配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmCallConfig {
+    /// 最大尝试次数（含首次调用）。
+    pub max_attempts: u32,
+    /// 指数退避初始延迟。
+    pub initial_delay: Duration,
+    /// 指数退避最大延迟。
+    pub max_delay: Duration,
+    /// 熔断连续失败阈值。
+    pub circuit_breaker_failure_threshold: u32,
+    /// 熔断冷却时间。
+    pub circuit_breaker_cooldown: Duration,
+}
+
+impl Default for LlmCallConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(200),
+            max_delay: Duration::from_secs(2),
+            circuit_breaker_failure_threshold: 3,
+            circuit_breaker_cooldown: Duration::from_secs(30),
+        }
+    }
+}
+
+impl LlmCallConfig {
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            max_attempts: self.max_attempts.max(1),
+            initial_delay: self.initial_delay.min(self.max_delay),
+            max_delay: self.max_delay,
+            circuit_breaker_failure_threshold: self.circuit_breaker_failure_threshold.max(1),
+            circuit_breaker_cooldown: self.circuit_breaker_cooldown,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CircuitBreakerState {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
+}
+
+impl CircuitBreakerState {
+    const fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            open_until: None,
+        }
+    }
+}
+
+/// 可跨多个 executor 共享的 LLM 调用保护策略。
+#[derive(Debug, Clone)]
+pub struct LlmCallPolicy {
+    config: LlmCallConfig,
+    state: Arc<Mutex<CircuitBreakerState>>,
+}
+
+impl Default for LlmCallPolicy {
+    fn default() -> Self {
+        Self::new(LlmCallConfig::default())
+    }
+}
+
+impl LlmCallPolicy {
+    #[must_use]
+    pub fn new(config: LlmCallConfig) -> Self {
+        Self {
+            config: config.normalized(),
+            state: Arc::new(Mutex::new(CircuitBreakerState::new())),
+        }
+    }
+
+    fn before_call(&self) -> Result<(), Error> {
+        let now = Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_error| Error::Llm("LLM 熔断状态锁已损坏".to_owned()))?;
+
+        if let Some(open_until) = state.open_until {
+            if now < open_until {
+                let remaining = open_until.saturating_duration_since(now);
+                return Err(Error::Llm(format!(
+                    "LLM 熔断开启，约 {}ms 后重试",
+                    remaining.as_millis()
+                )));
+            }
+            state.open_until = None;
+        }
+
+        Ok(())
+    }
+
+    fn record_success(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.consecutive_failures = 0;
+            state.open_until = None;
+        }
+    }
+
+    fn record_failure(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            if state.consecutive_failures >= self.config.circuit_breaker_failure_threshold {
+                state.open_until = Some(Instant::now() + self.config.circuit_breaker_cooldown);
+            }
+        }
+    }
+
+    fn retry_delay(&self, completed_failures: u32) -> Duration {
+        if completed_failures == 0 {
+            return Duration::ZERO;
+        }
+
+        let multiplier = 1_u32
+            .checked_shl(completed_failures.saturating_sub(1).min(31))
+            .unwrap_or(u32::MAX);
+        self.config
+            .initial_delay
+            .saturating_mul(multiplier)
+            .min(self.config.max_delay)
+    }
 }
 
 impl<'a> ReActExecutor<'a> {
     /// 创建执行器，自动从 `Tool` trait 构建工具定义列表。
     #[must_use]
     pub fn new(llm: &'a HttpLlmClient, tools: &'a [Box<dyn Tool>]) -> Self {
+        Self::with_llm_policy(llm, tools, LlmCallPolicy::default())
+    }
+
+    /// 创建执行器，并使用调用方提供的 LLM 调用保护策略。
+    #[must_use]
+    pub fn with_llm_policy(
+        llm: &'a HttpLlmClient,
+        tools: &'a [Box<dyn Tool>],
+        llm_policy: LlmCallPolicy,
+    ) -> Self {
         let tool_defs = tool_definitions_from_tools(tools);
 
         Self {
@@ -49,6 +195,7 @@ impl<'a> ReActExecutor<'a> {
             tools,
             tool_defs,
             messages: Vec::new(),
+            llm_policy,
         }
     }
 
@@ -57,15 +204,15 @@ impl<'a> ReActExecutor<'a> {
         self.messages.push(msg);
     }
 
-    /// 执行一步 ReAct：发送当前对话给 LLM，返回步骤结果。
+    /// 执行一步 `ReAct`：发送当前对话给 LLM，返回步骤结果。
     ///
     /// 将 LLM 回复自动加入对话历史。
     ///
     /// # Errors
     ///
-    /// LLM 调用失败时返回 [`Error::Llm`]。
+    /// LLM 调用失败时会对可重试错误做一次普通 `chat` 重试，仍失败时返回 [`Error::Llm`]。
     pub async fn step(&mut self) -> Result<StepResult, Error> {
-        let response = self.llm.chat(&self.messages, Some(&self.tool_defs)).await?;
+        let response = self.chat_with_retry().await?;
 
         // 将 assistant 消息加入历史
         self.messages.push(response.clone());
@@ -73,21 +220,30 @@ impl<'a> ReActExecutor<'a> {
         Ok(step_result_from_response(&response))
     }
 
-    /// 流式执行一步 ReAct：与 [`Self::step`] 等价，但通过 `on_delta` 回调
+    /// 流式执行一步 `ReAct`：与 [`Self::step`] 等价，但通过 `on_delta` 回调
     /// 实时回吐 assistant 文本增量片段。
+    ///
+    /// 当流式 LLM 调用失败时，降级为普通 `chat` 调用继续执行。
     ///
     /// # Errors
     ///
-    /// LLM 调用失败时返回 [`Error::Llm`]。
+    /// 流式调用与降级后的普通 `chat` 调用均失败时返回 [`Error::Llm`]。
     pub async fn step_stream<F, U>(&mut self, on_delta: F, on_usage: U) -> Result<StepResult, Error>
     where
         F: FnMut(&str) + Send,
         U: FnMut(TokenUsage) + Send,
     {
-        let response = self
+        let response = match self
             .llm
             .chat_stream(&self.messages, Some(&self.tool_defs), on_delta, on_usage)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("streaming LLM call failed; falling back to normal chat: {error}");
+                self.chat_with_retry().await?
+            }
+        };
 
         self.messages.push(response.clone());
 
@@ -96,7 +252,7 @@ impl<'a> ReActExecutor<'a> {
 
     /// 执行工具调用并将结果加入对话历史。
     ///
-    /// 工具执行失败时不传播错误，而是将错误信息作为结果返回给 LLM，
+    /// 前置校验和工具执行失败时不传播错误，而是将错误信息作为结果返回给 LLM，
     /// 让 LLM 自行决定如何处理（自我修正）。
     ///
     /// # Errors
@@ -115,12 +271,19 @@ impl<'a> ReActExecutor<'a> {
                 Some(t) => {
                     let params: serde_json::Value = serde_json::from_str(&call.function.arguments)
                         .map_err(|e| Error::Parse(format!("工具参数解析失败：{e}")))?;
-                    // 捕获工具执行错误，返回错误信息并附加重试建议
-                    match t.execute(&params).await {
-                        Ok(output) => output,
-                        Err(e) => format!(
-                            "工具执行失败：{e}\n\n建议：请检查参数是否正确，或尝试使用其他工具完成同样的目标。"
-                        ),
+
+                    if let Err(reason) = t.precheck(&params).await {
+                        format!(
+                            "工具前置校验未通过：{reason}\n\n建议：请调整参数或改用更安全的方式完成目标。"
+                        )
+                    } else {
+                        // 捕获工具执行错误，返回错误信息并附加重试建议
+                        match t.execute(&params).await {
+                            Ok(output) => output,
+                            Err(e) => format!(
+                                "工具执行失败：{e}\n\n建议：请检查参数是否正确，或尝试使用其他工具完成同样的目标。"
+                            ),
+                        }
                     }
                 }
                 None => format!(
@@ -149,6 +312,42 @@ impl<'a> ReActExecutor<'a> {
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
+
+    async fn chat_with_retry(&self) -> Result<ChatMessage, Error> {
+        self.llm_policy.before_call()?;
+        let mut attempt = 1_u32;
+        loop {
+            match self.llm.chat(&self.messages, Some(&self.tool_defs)).await {
+                Ok(response) => {
+                    self.llm_policy.record_success();
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if attempt >= self.llm_policy.config.max_attempts
+                        || !is_retryable_llm_error(&error)
+                    {
+                        self.llm_policy.record_failure();
+                        return Err(Error::from(error));
+                    }
+                    let delay = self.llm_policy.retry_delay(attempt);
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        "LLM chat call failed; retrying after exponential backoff: {error}"
+                    );
+                    if !delay.is_zero() {
+                        sleep(delay).await;
+                    }
+                    attempt += 1;
+                }
+            }
+        }
+    }
+}
+
+fn is_retryable_llm_error(error: &impl Display) -> bool {
+    let message = error.to_string();
+    message.contains("API 调用失败") || message.contains("流式响应读取失败")
 }
 
 fn truncate_tool_result(result: &str) -> String {

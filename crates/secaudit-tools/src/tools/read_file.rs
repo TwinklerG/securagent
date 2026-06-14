@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use super::sandbox::resolve_existing_path;
+use super::file_probe::is_binary;
+use super::sandbox::{
+    MAX_READ_FILE_SIZE, SensitivePathPolicy, check_file_size, resolve_existing_path,
+};
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -44,13 +47,25 @@ const MSG_MISSING_PATH: &str = "缺少 path 参数";
 pub struct ReadFile {
     /// 沙箱工作目录
     work_dir: PathBuf,
+    sensitive_paths: SensitivePathPolicy,
 }
 
 impl ReadFile {
     /// 创建实例，`work_dir` 为沙箱根目录。
     #[must_use]
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self::with_sensitive_path_policy(work_dir, SensitivePathPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            sensitive_paths,
+        }
     }
 }
 
@@ -128,7 +143,33 @@ impl Tool for ReadFile {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let path_str = params
+            .get(PARAM_PATH)
+            .and_then(Value::as_str)
+            .ok_or_else(|| MSG_MISSING_PATH.to_owned())?;
+
+        let resolved =
+            resolve_existing_path(&self.work_dir, path_str).map_err(|e| e.to_string())?;
+
+        if !resolved.is_file() {
+            return Err(format!("路径不是文件：{}", resolved.display()));
+        }
+        if self.sensitive_paths.has_sensitive_component(&resolved) {
+            return Err(format!("拒绝读取敏感文件：{}", resolved.display()));
+        }
+
+        check_file_size(&resolved, MAX_READ_FILE_SIZE).await?;
+        if is_binary(&resolved).await {
+            return Err(format!("拒绝读取二进制文件：{}", resolved.display()));
+        }
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let path_str = params
             .get(PARAM_PATH)
             .and_then(Value::as_str)

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::sandbox::{canonicalize_work_dir, resolve_search_dir};
+use super::sandbox::{SensitivePathPolicy, canonicalize_work_dir, resolve_search_dir};
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -31,13 +31,25 @@ const DEFAULT_MAX_RESULTS: usize = 100;
 pub struct FindFiles {
     /// 工作目录（沙箱根）
     work_dir: PathBuf,
+    sensitive_paths: SensitivePathPolicy,
 }
 
 impl FindFiles {
     /// 创建实例，`work_dir` 为沙箱根目录。
     #[must_use]
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self::with_sensitive_path_policy(work_dir, SensitivePathPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            sensitive_paths,
+        }
     }
 }
 
@@ -72,7 +84,33 @@ impl Tool for FindFiles {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let pattern = params
+            .get(PARAM_PATTERN)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "缺少 pattern 参数".to_owned())?;
+
+        glob::Pattern::new(pattern).map_err(|e| format!("glob 模式无效：{e}"))?;
+
+        let search_dir = resolve_search_dir(
+            &self.work_dir,
+            params.get(PARAM_PATH).and_then(Value::as_str),
+        )
+        .map_err(|e| e.to_string())?;
+
+        if !search_dir.is_dir() {
+            return Err(format!("路径不是目录：{}", search_dir.display()));
+        }
+        if self.sensitive_paths.has_sensitive_component(&search_dir) {
+            return Err(format!("拒绝搜索敏感目录：{}", search_dir.display()));
+        }
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let pattern = params
             .get(PARAM_PATTERN)
             .and_then(Value::as_str)
@@ -113,14 +151,26 @@ impl Tool for FindFiles {
             }
 
             let Ok(path) = entry else { continue };
+            let Ok(canonical_path) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_path.starts_with(&sandbox)
+                || self
+                    .sensitive_paths
+                    .has_sensitive_component(&canonical_path)
+            {
+                continue;
+            }
 
             // 仅包含文件（跳过目录）
-            if !path.is_file() {
+            if !canonical_path.is_file() {
                 continue;
             }
 
             // 生成相对路径
-            let relative = path.strip_prefix(&sandbox).unwrap_or(&path);
+            let relative = canonical_path
+                .strip_prefix(&sandbox)
+                .unwrap_or(&canonical_path);
             let _ = writeln!(output, "{}", relative.display());
             count += 1;
         }

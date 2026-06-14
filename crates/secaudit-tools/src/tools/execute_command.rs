@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use crate::error::Error;
 use crate::tools::{ConfirmFn, Tool};
 
+pub use self::policy::CommandPolicyConfig;
 use self::policy::{CommandDecision, CommandPolicy};
 
 // —— 工具元信息 ——
@@ -56,12 +57,27 @@ pub struct ExecuteCommand {
     work_dir: PathBuf,
     /// 用户确认回调
     confirm: ConfirmFn,
+    /// 命令安全策略
+    policy: CommandPolicy,
 }
 
 impl ExecuteCommand {
     /// 创建实例。
     pub fn new(work_dir: PathBuf, confirm: ConfirmFn) -> Self {
-        Self { work_dir, confirm }
+        Self::with_policy(work_dir, confirm, CommandPolicyConfig::default())
+    }
+
+    /// 使用用户配置的命令策略创建实例。
+    pub fn with_policy(
+        work_dir: PathBuf,
+        confirm: ConfirmFn,
+        policy_config: CommandPolicyConfig,
+    ) -> Self {
+        Self {
+            work_dir,
+            confirm,
+            policy: CommandPolicy::new(policy_config),
+        }
     }
 }
 
@@ -101,6 +117,15 @@ fn format_command_output(stdout: &[u8], stderr: &[u8]) -> String {
     combined
 }
 
+fn command_from_params(params: &Value) -> Result<&str, String> {
+    let command = params
+        .get(PARAM_COMMAND)
+        .and_then(Value::as_str)
+        .ok_or_else(|| MSG_MISSING_COMMAND.to_owned())?;
+
+    Ok(command)
+}
+
 #[async_trait]
 impl Tool for ExecuteCommand {
     fn name(&self) -> Cow<'_, str> {
@@ -128,18 +153,26 @@ impl Tool for ExecuteCommand {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let command = command_from_params(params)?;
+        let decision = self.policy.decide(command);
+        if matches!(decision, CommandDecision::Block) {
+            Err(format!("{MSG_BLOCKED}：{command}"))
+        } else {
+            Ok(())
+        }
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
-        let command = params
-            .get(PARAM_COMMAND)
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Tool(MSG_MISSING_COMMAND.into()))?;
+        let command = command_from_params(params).map_err(Error::Tool)?;
+        let decision = self.policy.decide(command);
 
         let timeout_secs = params
             .get(PARAM_TIMEOUT_SECS)
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        match CommandPolicy::decide(command) {
+        match decision {
             CommandDecision::Block => {
                 return Err(Error::Tool(format!("{MSG_BLOCKED}：{command}")));
             }

@@ -15,7 +15,11 @@ pub mod error {
 }
 
 pub mod tools {
-    pub use secaudit_tools::{ConfirmFn, Tool, audit_tools, default_tools};
+    pub use secaudit_tools::{
+        CommandPolicyConfig, ConfirmFn, SensitivePathPolicyConfig, Tool, audit_tools,
+        audit_tools_with_sensitive_path_policy, default_tools, default_tools_with_command_policy,
+        default_tools_with_policies,
+    };
 }
 
 pub use agent::state;

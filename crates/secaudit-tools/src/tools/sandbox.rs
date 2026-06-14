@@ -1,8 +1,74 @@
 //! 工具文件路径沙箱。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+use tokio::fs as async_fs;
 
 use crate::error::Error;
+
+/// 单次 `read_file` 允许读取的最大文件大小。
+pub const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// `search_content` 遍历时单个文件允许读取的最大文件大小。
+pub const MAX_SEARCH_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// 单次 `write_file` 允许写入的最大内容大小。
+pub const MAX_WRITE_CONTENT_SIZE: usize = 5 * 1024 * 1024;
+
+/// 内置保护列表：常见凭据、密钥和本地环境配置文件名。
+///
+/// 用户配置只能追加敏感路径规则，不能移除这些默认保护项。
+const SENSITIVE_COMPONENTS: &[&str] = &[
+    ".env",
+    ".ssh",
+    ".gnupg",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SensitivePathPolicyConfig {
+    pub blocklist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SensitivePathPolicy {
+    config: SensitivePathPolicyConfig,
+}
+
+impl SensitivePathPolicy {
+    #[must_use]
+    pub fn new(config: SensitivePathPolicyConfig) -> Self {
+        Self { config }
+    }
+
+    #[must_use]
+    pub fn has_sensitive_component(&self, path: &Path) -> bool {
+        path.components().any(|component| {
+            let name = component.as_os_str().to_string_lossy();
+            is_sensitive_component_name(&name) || self.matches_user_rule(path, &name)
+        })
+    }
+
+    fn matches_user_rule(&self, path: &Path, component_name: &str) -> bool {
+        let component = component_name.to_ascii_lowercase();
+        let path = path.to_string_lossy().to_ascii_lowercase();
+        let normalized_path = path.replace('\\', "/");
+        self.config.blocklist.iter().any(|rule| {
+            let rule = rule.trim().to_ascii_lowercase();
+            if rule.is_empty() {
+                return false;
+            }
+            if rule.contains('/') || rule.contains('\\') {
+                normalized_path.contains(&rule.replace('\\', "/"))
+            } else {
+                component == rule
+                    || component.starts_with(&format!("{rule}."))
+                    || component.ends_with(&format!(".{rule}"))
+            }
+        })
+    }
+}
 
 /// 路径解析失败模板
 const MSG_PATH_RESOLVE_FAIL: &str = "路径解析失败";
@@ -31,7 +97,19 @@ pub fn resolve_existing_path(work_dir: &Path, raw: &str) -> Result<PathBuf, Erro
 /// 写入工具允许目标文件或父目录尚不存在，因此不能直接 canonicalize
 /// 目标路径，只能校验最近的已存在祖先目录。
 pub fn resolve_writable_path(work_dir: &Path, raw: &str) -> Result<PathBuf, Error> {
-    let target = path_from_user_input(work_dir, raw);
+    let sandbox = canonicalize_work_dir(work_dir)?;
+    let target = lexical_normalize(&path_from_user_input(&sandbox, raw));
+
+    ensure_inside_work_dir(&target, &sandbox, MSG_WRITE_OUTSIDE_SANDBOX)?;
+
+    if target.symlink_metadata().is_ok() {
+        let resolved_target = target
+            .canonicalize()
+            .map_err(|e| Error::Tool(format!("{MSG_WRITE_OUTSIDE_SANDBOX}：无法解析目标：{e}")))?;
+        ensure_inside_work_dir(&resolved_target, &sandbox, MSG_WRITE_OUTSIDE_SANDBOX)?;
+        return Ok(resolved_target);
+    }
+
     let parent = target
         .parent()
         .ok_or_else(|| Error::Tool(format!("{MSG_WRITE_OUTSIDE_SANDBOX}：无法获取父目录")))?;
@@ -39,7 +117,7 @@ pub fn resolve_writable_path(work_dir: &Path, raw: &str) -> Result<PathBuf, Erro
         .and_then(|path| path.canonicalize().ok())
         .ok_or_else(|| Error::Tool(format!("{MSG_WRITE_OUTSIDE_SANDBOX}：无法解析路径")))?;
 
-    ensure_inside_work_dir(&canonical_base, work_dir, MSG_WRITE_OUTSIDE_SANDBOX)?;
+    ensure_inside_work_dir(&canonical_base, &sandbox, MSG_WRITE_OUTSIDE_SANDBOX)?;
     Ok(target)
 }
 
@@ -60,6 +138,39 @@ pub fn resolve_search_dir(work_dir: &Path, raw: Option<&str>) -> Result<PathBuf,
     )
 }
 
+fn is_sensitive_component_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    SENSITIVE_COMPONENTS
+        .iter()
+        .any(|sensitive| lower == *sensitive)
+        || lower.starts_with(".env.")
+}
+
+/// 校验文件大小是否不超过指定上限。
+pub async fn check_file_size(path: &Path, max_bytes: u64) -> Result<(), String> {
+    let metadata = async_fs::metadata(path)
+        .await
+        .map_err(|e| format!("无法读取文件元数据：{e}"))?;
+    let len = metadata.len();
+    if len > max_bytes {
+        Err(format!("文件过大：{len} bytes，限制为 {max_bytes} bytes"))
+    } else {
+        Ok(())
+    }
+}
+
+/// 校验待写入内容大小是否不超过指定上限。
+pub fn check_content_size(content: &str, max_bytes: usize) -> Result<(), String> {
+    let len = content.len();
+    if len > max_bytes {
+        Err(format!(
+            "写入内容过大：{len} bytes，限制为 {max_bytes} bytes"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn path_from_user_input(work_dir: &Path, raw: &str) -> PathBuf {
     let path = Path::new(raw);
     if path.is_absolute() {
@@ -67,6 +178,23 @@ fn path_from_user_input(work_dir: &Path, raw: &str) -> PathBuf {
     } else {
         work_dir.join(path)
     }
+}
+
+/// 仅按路径组件折叠 `.` 与 `..`，不访问文件系统。
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 fn ensure_inside_work_dir(path: &Path, work_dir: &Path, message: &str) -> Result<(), Error> {
@@ -162,7 +290,10 @@ mod tests {
         let target =
             resolve_writable_path(&work_dir, "nested/new.txt").expect("resolve writable path");
 
-        assert_eq!(target, work_dir.join("nested/new.txt"));
+        assert_eq!(
+            target,
+            work_dir.canonicalize().unwrap().join("nested/new.txt")
+        );
     }
 
     #[test]

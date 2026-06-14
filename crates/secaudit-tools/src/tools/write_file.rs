@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::fs;
 
-use super::sandbox::resolve_writable_path;
+use super::sandbox::{
+    MAX_WRITE_CONTENT_SIZE, SensitivePathPolicy, check_content_size, resolve_writable_path,
+};
 use crate::error::Error;
 use crate::tools::{ConfirmFn, Tool};
 
@@ -33,12 +35,25 @@ pub struct WriteFile {
     work_dir: PathBuf,
     /// 用户确认回调
     confirm: ConfirmFn,
+    sensitive_paths: SensitivePathPolicy,
 }
 
 impl WriteFile {
     /// 创建实例。
     pub fn new(work_dir: PathBuf, confirm: ConfirmFn) -> Self {
-        Self { work_dir, confirm }
+        Self::with_sensitive_path_policy(work_dir, confirm, SensitivePathPolicy::default())
+    }
+
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        confirm: ConfirmFn,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            confirm,
+            sensitive_paths,
+        }
     }
 }
 
@@ -69,7 +84,29 @@ impl Tool for WriteFile {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let path_str = params
+            .get(PARAM_PATH)
+            .and_then(Value::as_str)
+            .ok_or_else(|| MSG_MISSING_PATH.to_owned())?;
+
+        let content = params
+            .get(PARAM_CONTENT)
+            .and_then(Value::as_str)
+            .ok_or_else(|| MSG_MISSING_CONTENT.to_owned())?;
+
+        let target = resolve_writable_path(&self.work_dir, path_str).map_err(|e| e.to_string())?;
+        if self.sensitive_paths.has_sensitive_component(&target) {
+            return Err(format!("拒绝写入敏感文件：{}", target.display()));
+        }
+        check_content_size(content, MAX_WRITE_CONTENT_SIZE)?;
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let path_str = params
             .get(PARAM_PATH)
             .and_then(Value::as_str)

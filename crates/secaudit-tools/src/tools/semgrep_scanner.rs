@@ -5,10 +5,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use tokio::process::Command;
 
 use crate::error::Error;
 use crate::tools::Tool;
+
+use super::sandbox::{SensitivePathPolicy, resolve_existing_path};
 
 // —— 参数字段名 ——
 
@@ -81,18 +84,32 @@ struct SemgrepPosition {
 }
 
 /// Semgrep 静态安全扫描工具
-pub struct SemgrepScanner;
+pub struct SemgrepScanner {
+    work_dir: PathBuf,
+    sensitive_paths: SensitivePathPolicy,
+}
 
 impl SemgrepScanner {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self::with_sensitive_path_policy(work_dir, SensitivePathPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            sensitive_paths,
+        }
     }
 }
 
 impl Default for SemgrepScanner {
     fn default() -> Self {
-        Self::new()
+        Self::new(PathBuf::from("."))
     }
 }
 
@@ -123,11 +140,31 @@ impl Tool for SemgrepScanner {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let project_path = params
+            .get(PARAM_PROJECT_PATH)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "缺少 project_path 参数".to_owned())?;
+
+        let resolved =
+            resolve_existing_path(&self.work_dir, project_path).map_err(|e| e.to_string())?;
+        if self.sensitive_paths.has_sensitive_component(&resolved) {
+            return Err(format!("拒绝扫描敏感路径：{}", resolved.display()));
+        }
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let project_path = params
             .get(PARAM_PROJECT_PATH)
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Tool("缺少 project_path 参数".into()))?;
+
+        let resolved = resolve_existing_path(&self.work_dir, project_path)?;
+        let resolved_arg = resolved.to_string_lossy().into_owned();
 
         let ruleset = params
             .get(PARAM_RULESET)
@@ -142,7 +179,7 @@ impl Tool for SemgrepScanner {
                 ruleset,
                 "--json",
                 "--quiet",
-                project_path,
+                &resolved_arg,
             ])
             .output()
             .await;

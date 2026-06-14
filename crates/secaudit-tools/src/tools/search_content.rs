@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use tokio::fs;
 
 use super::file_probe::is_binary;
-use super::sandbox::{canonicalize_work_dir, resolve_search_dir};
+use super::sandbox::{
+    MAX_SEARCH_FILE_SIZE, SensitivePathPolicy, canonicalize_work_dir, check_file_size,
+    resolve_search_dir,
+};
 use crate::error::Error;
 use crate::tools::Tool;
 
@@ -48,25 +51,41 @@ const MATCH_SEPARATOR: &str = "---";
 pub struct SearchContent {
     /// 工作目录（沙箱根）
     work_dir: PathBuf,
+    sensitive_paths: SensitivePathPolicy,
 }
 
 impl SearchContent {
     /// 创建实例，`work_dir` 为沙箱根目录。
     #[must_use]
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self::with_sensitive_path_policy(work_dir, SensitivePathPolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_sensitive_path_policy(
+        work_dir: PathBuf,
+        sensitive_paths: SensitivePathPolicy,
+    ) -> Self {
+        Self {
+            work_dir,
+            sensitive_paths,
+        }
     }
 }
 
 /// 异步递归收集目录下所有文件路径。
-async fn collect_files(dir: &Path) -> Vec<PathBuf> {
+async fn collect_files(dir: &Path, sensitive_paths: &SensitivePathPolicy) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    Box::pin(collect_files_recursive(dir, &mut files)).await;
+    Box::pin(collect_files_recursive(dir, &mut files, sensitive_paths)).await;
     files
 }
 
 /// 异步递归辅助函数。
-async fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
+async fn collect_files_recursive(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    sensitive_paths: &SensitivePathPolicy,
+) {
     let Ok(mut reader) = fs::read_dir(dir).await else {
         return;
     };
@@ -81,7 +100,10 @@ async fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
             continue;
         };
         if ft.is_dir() {
-            Box::pin(collect_files_recursive(&path, files)).await;
+            if sensitive_paths.has_sensitive_component(&path) {
+                continue;
+            }
+            Box::pin(collect_files_recursive(&path, files, sensitive_paths)).await;
         } else {
             files.push(path);
         }
@@ -149,7 +171,33 @@ impl Tool for SearchContent {
         })
     }
 
+    async fn precheck(&self, params: &Value) -> Result<(), String> {
+        let pattern_str = params
+            .get(PARAM_PATTERN)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "缺少 pattern 参数".to_owned())?;
+
+        Regex::new(pattern_str).map_err(|e| format!("正则表达式无效：{e}"))?;
+
+        let search_dir = resolve_search_dir(
+            &self.work_dir,
+            params.get(PARAM_PATH).and_then(Value::as_str),
+        )
+        .map_err(|e| e.to_string())?;
+
+        if !search_dir.is_dir() {
+            return Err(format!("路径不是目录：{}", search_dir.display()));
+        }
+        if self.sensitive_paths.has_sensitive_component(&search_dir) {
+            return Err(format!("拒绝搜索敏感目录：{}", search_dir.display()));
+        }
+
+        Ok(())
+    }
+
     async fn execute(&self, params: &Value) -> Result<String, Error> {
+        self.precheck(params).await.map_err(Error::Tool)?;
+
         let pattern_str = params
             .get(PARAM_PATTERN)
             .and_then(Value::as_str)
@@ -190,7 +238,7 @@ impl Tool for SearchContent {
             .map_or(DEFAULT_MAX_RESULTS, |v| v as usize);
 
         // 异步递归遍历文件
-        let files = collect_files(&search_dir).await;
+        let files = collect_files(&search_dir, &self.sensitive_paths).await;
         let mut match_count: usize = 0;
         let mut output = String::new();
 
@@ -200,10 +248,23 @@ impl Tool for SearchContent {
             if match_count >= max_results {
                 break;
             }
+            if self.sensitive_paths.has_sensitive_component(file_path) {
+                continue;
+            }
+            let Ok(canonical_path) = file_path.canonicalize() else {
+                continue;
+            };
+            if !canonical_path.starts_with(&sandbox)
+                || self
+                    .sensitive_paths
+                    .has_sensitive_component(&canonical_path)
+            {
+                continue;
+            }
 
             // glob 过滤
             if let Some(gf) = &glob_filter {
-                let file_name = file_path
+                let file_name = canonical_path
                     .file_name()
                     .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                 if !gf.matches(&file_name) {
@@ -212,20 +273,26 @@ impl Tool for SearchContent {
             }
 
             // 异步跳过二进制文件
-            if is_binary(file_path).await {
+            if check_file_size(&canonical_path, MAX_SEARCH_FILE_SIZE)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            if is_binary(&canonical_path).await {
                 continue;
             }
 
-            let Ok(content) = fs::read_to_string(file_path).await else {
+            let Ok(content) = fs::read_to_string(&canonical_path).await else {
                 continue;
             };
 
             let lines: Vec<&str> = content.lines().collect();
 
             // 生成相对路径用于输出
-            let display_path = file_path
+            let display_path = canonical_path
                 .strip_prefix(&sandbox)
-                .unwrap_or(file_path)
+                .unwrap_or(&canonical_path)
                 .display()
                 .to_string();
 

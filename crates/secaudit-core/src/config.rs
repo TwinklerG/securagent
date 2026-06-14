@@ -21,6 +21,23 @@ const ENV_STRATEGY: &str = "SECAUDIT_STRATEGY";
 const ENV_ENABLE_SKILLS: &str = "SECAUDIT_ENABLE_SKILLS";
 /// 上下文窗口大小环境变量。
 const ENV_CONTEXT_WINDOW_TOKENS: &str = "SECAUDIT_CONTEXT_WINDOW_TOKENS";
+/// 命令自动放行白名单环境变量（逗号分隔）。
+const ENV_COMMAND_ALLOWLIST: &str = "SECAUDIT_COMMAND_ALLOWLIST";
+/// 命令禁止黑名单环境变量（逗号分隔）。
+const ENV_COMMAND_BLOCKLIST: &str = "SECAUDIT_COMMAND_BLOCKLIST";
+/// 敏感路径追加黑名单环境变量（逗号分隔）。
+const ENV_SENSITIVE_PATH_BLOCKLIST: &str = "SECAUDIT_SENSITIVE_PATH_BLOCKLIST";
+/// LLM 最大调用尝试次数环境变量。
+const ENV_LLM_RETRY_MAX_ATTEMPTS: &str = "SECAUDIT_LLM_RETRY_MAX_ATTEMPTS";
+/// LLM 重试初始退避毫秒数环境变量。
+const ENV_LLM_RETRY_INITIAL_DELAY_MS: &str = "SECAUDIT_LLM_RETRY_INITIAL_DELAY_MS";
+/// LLM 重试最大退避毫秒数环境变量。
+const ENV_LLM_RETRY_MAX_DELAY_MS: &str = "SECAUDIT_LLM_RETRY_MAX_DELAY_MS";
+/// LLM 熔断连续失败阈值环境变量。
+const ENV_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD: &str =
+    "SECAUDIT_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD";
+/// LLM 熔断冷却毫秒数环境变量。
+const ENV_LLM_CIRCUIT_BREAKER_COOLDOWN_MS: &str = "SECAUDIT_LLM_CIRCUIT_BREAKER_COOLDOWN_MS";
 /// 默认配置文件名。
 const CONFIG_FILE: &str = "config.json";
 
@@ -36,6 +53,16 @@ const DEFAULT_STRATEGY: &str = "react";
 const DEFAULT_ENABLE_SKILLS: bool = true;
 /// 默认上下文窗口大小
 const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
+/// 默认 LLM 最大调用尝试次数
+const DEFAULT_LLM_RETRY_MAX_ATTEMPTS: u32 = 2;
+/// 默认 LLM 重试初始退避毫秒数
+const DEFAULT_LLM_RETRY_INITIAL_DELAY_MS: u64 = 200;
+/// 默认 LLM 重试最大退避毫秒数
+const DEFAULT_LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
+/// 默认 LLM 熔断连续失败阈值
+const DEFAULT_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD: u32 = 3;
+/// 默认 LLM 熔断冷却毫秒数
+const DEFAULT_LLM_CIRCUIT_BREAKER_COOLDOWN_MS: u64 = 30_000;
 
 /// 应用配置，支持环境变量（`SECAUDIT_` 前缀）和配置文件两种来源。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -56,6 +83,25 @@ pub struct Config {
     pub context_window_tokens: u64,
     #[serde(default)]
     pub context_window_tokens_overridden: bool,
+    /// 用户配置的命令自动放行白名单。
+    #[serde(default)]
+    pub command_allowlist: Vec<String>,
+    /// 用户配置的命令禁止黑名单。
+    #[serde(default)]
+    pub command_blocklist: Vec<String>,
+    /// 用户追加的敏感路径/组件黑名单。
+    #[serde(default)]
+    pub sensitive_path_blocklist: Vec<String>,
+    /// LLM 调用最大尝试次数（含首次调用）。
+    pub llm_retry_max_attempts: u32,
+    /// LLM 指数退避初始延迟毫秒数。
+    pub llm_retry_initial_delay_ms: u64,
+    /// LLM 指数退避最大延迟毫秒数。
+    pub llm_retry_max_delay_ms: u64,
+    /// LLM 熔断连续失败阈值。
+    pub llm_circuit_breaker_failure_threshold: u32,
+    /// LLM 熔断冷却毫秒数。
+    pub llm_circuit_breaker_cooldown_ms: u64,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -68,6 +114,14 @@ struct FileConfig {
     reasoning_strategy: Option<String>,
     enable_skills: Option<bool>,
     context_window_tokens: Option<u64>,
+    command_allowlist: Option<Vec<String>>,
+    command_blocklist: Option<Vec<String>>,
+    sensitive_path_blocklist: Option<Vec<String>>,
+    llm_retry_max_attempts: Option<u32>,
+    llm_retry_initial_delay_ms: Option<u64>,
+    llm_retry_max_delay_ms: Option<u64>,
+    llm_circuit_breaker_failure_threshold: Option<u32>,
+    llm_circuit_breaker_cooldown_ms: Option<u64>,
 }
 
 impl Default for Config {
@@ -81,6 +135,14 @@ impl Default for Config {
             enable_skills: DEFAULT_ENABLE_SKILLS,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             context_window_tokens_overridden: false,
+            command_allowlist: Vec::new(),
+            command_blocklist: Vec::new(),
+            sensitive_path_blocklist: Vec::new(),
+            llm_retry_max_attempts: DEFAULT_LLM_RETRY_MAX_ATTEMPTS,
+            llm_retry_initial_delay_ms: DEFAULT_LLM_RETRY_INITIAL_DELAY_MS,
+            llm_retry_max_delay_ms: DEFAULT_LLM_RETRY_MAX_DELAY_MS,
+            llm_circuit_breaker_failure_threshold: DEFAULT_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            llm_circuit_breaker_cooldown_ms: DEFAULT_LLM_CIRCUIT_BREAKER_COOLDOWN_MS,
         }
     }
 }
@@ -179,6 +241,28 @@ impl Config {
                 })
             })
             .transpose()?;
+        let command_allowlist = read_env(ENV_COMMAND_ALLOWLIST)
+            .map(|value| parse_csv_list(ENV_COMMAND_ALLOWLIST, &value));
+        let command_blocklist = read_env(ENV_COMMAND_BLOCKLIST)
+            .map(|value| parse_csv_list(ENV_COMMAND_BLOCKLIST, &value));
+        let sensitive_path_blocklist = read_env(ENV_SENSITIVE_PATH_BLOCKLIST)
+            .map(|value| parse_csv_list(ENV_SENSITIVE_PATH_BLOCKLIST, &value));
+        let llm_retry_max_attempts = read_env(ENV_LLM_RETRY_MAX_ATTEMPTS)
+            .map(|value| parse_positive_u32(ENV_LLM_RETRY_MAX_ATTEMPTS, &value))
+            .transpose()?;
+        let llm_retry_initial_delay_ms = read_env(ENV_LLM_RETRY_INITIAL_DELAY_MS)
+            .map(|value| parse_u64(ENV_LLM_RETRY_INITIAL_DELAY_MS, &value))
+            .transpose()?;
+        let llm_retry_max_delay_ms = read_env(ENV_LLM_RETRY_MAX_DELAY_MS)
+            .map(|value| parse_u64(ENV_LLM_RETRY_MAX_DELAY_MS, &value))
+            .transpose()?;
+        let llm_circuit_breaker_failure_threshold =
+            read_env(ENV_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD)
+                .map(|value| parse_positive_u32(ENV_LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD, &value))
+                .transpose()?;
+        let llm_circuit_breaker_cooldown_ms = read_env(ENV_LLM_CIRCUIT_BREAKER_COOLDOWN_MS)
+            .map(|value| parse_u64(ENV_LLM_CIRCUIT_BREAKER_COOLDOWN_MS, &value))
+            .transpose()?;
         self.apply_patch(FileConfig {
             api_base_url: read_env(ENV_API_BASE_URL),
             api_key: read_env(ENV_API_KEY),
@@ -187,6 +271,14 @@ impl Config {
             reasoning_strategy: read_env(ENV_STRATEGY),
             enable_skills,
             context_window_tokens,
+            command_allowlist,
+            command_blocklist,
+            sensitive_path_blocklist,
+            llm_retry_max_attempts,
+            llm_retry_initial_delay_ms,
+            llm_retry_max_delay_ms,
+            llm_circuit_breaker_failure_threshold,
+            llm_circuit_breaker_cooldown_ms,
         })
     }
 
@@ -221,6 +313,40 @@ impl Config {
             self.context_window_tokens = value;
             self.context_window_tokens_overridden = true;
         }
+        if let Some(value) = normalize_string_list(patch.command_allowlist) {
+            self.command_allowlist = value;
+        }
+        if let Some(value) = normalize_string_list(patch.command_blocklist) {
+            self.command_blocklist = value;
+        }
+        if let Some(value) = normalize_string_list(patch.sensitive_path_blocklist) {
+            self.sensitive_path_blocklist = value;
+        }
+        if let Some(value) = patch.llm_retry_max_attempts {
+            if value == 0 {
+                return Err(Error::Config(
+                    "配置项 llm_retry_max_attempts 必须大于 0".to_owned(),
+                ));
+            }
+            self.llm_retry_max_attempts = value;
+        }
+        if let Some(value) = patch.llm_retry_initial_delay_ms {
+            self.llm_retry_initial_delay_ms = value;
+        }
+        if let Some(value) = patch.llm_retry_max_delay_ms {
+            self.llm_retry_max_delay_ms = value;
+        }
+        if let Some(value) = patch.llm_circuit_breaker_failure_threshold {
+            if value == 0 {
+                return Err(Error::Config(
+                    "配置项 llm_circuit_breaker_failure_threshold 必须大于 0".to_owned(),
+                ));
+            }
+            self.llm_circuit_breaker_failure_threshold = value;
+        }
+        if let Some(value) = patch.llm_circuit_breaker_cooldown_ms {
+            self.llm_circuit_breaker_cooldown_ms = value;
+        }
         Ok(())
     }
 
@@ -235,6 +361,21 @@ impl Config {
         if self.context_window_tokens == 0 {
             return Err(Error::Config(
                 "配置项 context_window_tokens 必须大于 0".to_owned(),
+            ));
+        }
+        if self.llm_retry_max_attempts == 0 {
+            return Err(Error::Config(
+                "配置项 llm_retry_max_attempts 必须大于 0".to_owned(),
+            ));
+        }
+        if self.llm_retry_initial_delay_ms > self.llm_retry_max_delay_ms {
+            return Err(Error::Config(
+                "配置项 llm_retry_initial_delay_ms 不能大于 llm_retry_max_delay_ms".to_owned(),
+            ));
+        }
+        if self.llm_circuit_breaker_failure_threshold == 0 {
+            return Err(Error::Config(
+                "配置项 llm_circuit_breaker_failure_threshold 必须大于 0".to_owned(),
             ));
         }
         Ok(self)
@@ -272,6 +413,10 @@ fn require_non_empty_with_hint(name: &str, value: String) -> Result<String, Erro
 }
 
 fn parse_max_iterations(source: &str, value: &str) -> Result<u32, Error> {
+    parse_positive_u32(source, value)
+}
+
+fn parse_positive_u32(source: &str, value: &str) -> Result<u32, Error> {
     let parsed = value.trim().parse::<u32>().map_err(|error| {
         Error::Config(format!(
             "{source} 必须是正整数，当前值为 {value:?}：{error}"
@@ -281,6 +426,30 @@ fn parse_max_iterations(source: &str, value: &str) -> Result<u32, Error> {
         return Err(Error::Config(format!("{source} 必须大于 0")));
     }
     Ok(parsed)
+}
+
+fn parse_u64(source: &str, value: &str) -> Result<u64, Error> {
+    value.trim().parse::<u64>().map_err(|error| {
+        Error::Config(format!(
+            "{source} 必须是非负整数，当前值为 {value:?}：{error}"
+        ))
+    })
+}
+
+fn parse_csv_list(_source: &str, value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .filter_map(|item| non_empty_string(Some(item.to_owned())))
+        .collect()
+}
+
+fn normalize_string_list(value: Option<Vec<String>>) -> Option<Vec<String>> {
+    value.map(|items| {
+        items
+            .into_iter()
+            .filter_map(|item| non_empty_string(Some(item)))
+            .collect()
+    })
 }
 
 fn parse_bool(source: &str, value: &str) -> Result<bool, Error> {

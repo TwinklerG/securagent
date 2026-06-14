@@ -2527,6 +2527,7 @@ dependencies = [
  "secaudit-tools",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid",
 ]

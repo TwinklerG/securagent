@@ -8,6 +8,7 @@ pub mod strategy;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::Error;
@@ -17,7 +18,9 @@ use crate::session::Session;
 use crate::tools;
 use crate::tools::{ConfirmFn, Tool};
 use events::EventBus;
-use executor::{ReActExecutor, StepResult, tool_definitions_from_tools};
+use executor::{
+    LlmCallConfig, LlmCallPolicy, ReActExecutor, StepResult, tool_definitions_from_tools,
+};
 use state::AgentState;
 
 use secaudit_skills::SkillRegistry;
@@ -67,6 +70,8 @@ pub struct Agent {
     config: Config,
     /// LLM 客户端
     llm: HttpLlmClient,
+    /// LLM 调用重试与熔断策略
+    llm_policy: LlmCallPolicy,
     /// 可用工具集
     tools: Vec<Box<dyn Tool>>,
     /// 事件总线：状态与回调管理
@@ -138,7 +143,26 @@ impl Agent {
     #[must_use]
     pub fn new(config: Config, work_dir: PathBuf, confirm: ConfirmFn) -> Self {
         let llm = llm::create_client(&config);
-        let mut tools = tools::default_tools(work_dir.clone(), confirm);
+        let command_policy = tools::CommandPolicyConfig {
+            allowlist: config.command_allowlist.clone(),
+            blocklist: config.command_blocklist.clone(),
+        };
+        let sensitive_path_policy = tools::SensitivePathPolicyConfig {
+            blocklist: config.sensitive_path_blocklist.clone(),
+        };
+        let mut tools = tools::default_tools_with_policies(
+            work_dir.clone(),
+            confirm,
+            command_policy,
+            sensitive_path_policy,
+        );
+        let llm_policy = LlmCallPolicy::new(LlmCallConfig {
+            max_attempts: config.llm_retry_max_attempts,
+            initial_delay: Duration::from_millis(config.llm_retry_initial_delay_ms),
+            max_delay: Duration::from_millis(config.llm_retry_max_delay_ms),
+            circuit_breaker_failure_threshold: config.llm_circuit_breaker_failure_threshold,
+            circuit_breaker_cooldown: Duration::from_millis(config.llm_circuit_breaker_cooldown_ms),
+        });
         let skill_registry = if config.enable_skills {
             match SkillRegistry::load_from_dir(&work_dir) {
                 Ok(registry) => {
@@ -158,6 +182,7 @@ impl Agent {
         Self {
             config,
             llm,
+            llm_policy,
             tools,
             events: EventBus::default(),
             skill_registry,
@@ -302,7 +327,8 @@ impl Agent {
         session.push_message(ChatMessage::user(user_message));
 
         // 构建 executor 并加载历史；本轮输入使用 Skill 注入后的内容。
-        let mut executor = ReActExecutor::new(&self.llm, &self.tools);
+        let mut executor =
+            ReActExecutor::with_llm_policy(&self.llm, &self.tools, self.llm_policy.clone());
         let history_len = session.messages().len().saturating_sub(1);
         for msg in session.messages().iter().take(history_len) {
             executor.push_message(msg.clone());
@@ -394,13 +420,19 @@ impl Agent {
         self.events.set_state(AgentState::Init);
 
         // 单文件审计使用受限工具集
-        let mut audit_tools = tools::audit_tools();
+        let mut audit_tools = tools::audit_tools_with_sensitive_path_policy(
+            self.work_dir.clone(),
+            tools::SensitivePathPolicyConfig {
+                blocklist: self.config.sensitive_path_blocklist.clone(),
+            },
+        );
         if let Some(registry) = &self.skill_registry {
             audit_tools.push(Box::new(skill_tool::UseSkillTool::new(Arc::clone(
                 registry,
             ))));
         }
-        let mut executor = ReActExecutor::new(&self.llm, &audit_tools);
+        let mut executor =
+            ReActExecutor::with_llm_policy(&self.llm, &audit_tools, self.llm_policy.clone());
 
         // 1. 系统 prompt
         executor.push_message(ChatMessage::system(prompt::SYSTEM_PROMPT));
