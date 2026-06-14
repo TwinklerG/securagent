@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 
 use secaudit_agent::state::AgentState;
-use secaudit_agent::{ChatMessage as AgentChatMessage, Role, TokenUsage};
+use secaudit_agent::{ChatMessage as AgentChatMessage, Role, SubagentEvent, TokenUsage};
 use secaudit_conversation::{
     ContextCompressionEvent, ContextUsage, ConversationConfig, ConversationService, ManagedSession,
     SessionListItem,
@@ -94,6 +94,7 @@ enum WorkerEvent {
         name: String,
         result: String,
     },
+    Subagent(SubagentEvent),
     ContextCompaction(ContextCompressionEvent),
     ChatDone {
         response: Result<String, String>,

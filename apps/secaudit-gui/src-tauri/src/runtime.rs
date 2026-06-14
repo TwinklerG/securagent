@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use secaudit_agent::llm;
-use secaudit_agent::{Agent, ChatMessage, HttpLlmClient, Role, TokenUsage};
+use secaudit_agent::{Agent, ChatMessage, HttpLlmClient, Role, SubagentEvent, TokenUsage};
 use secaudit_conversation::{
     ContextCompressionEvent, ConversationConfig, ConversationService, ManagedSession,
     SessionListItem, SessionManagementInfo, SessionPreviewRole, SessionStatus,
@@ -760,6 +760,26 @@ fn bind_agent_events(agent: &mut Agent, app: &AppHandle, trace: &SharedTrace) {
         agent.on_tool_result(move |name, result| {
             record_and_emit_agent_event(&app, &trace, TraceEventKind::ToolResult, name, result);
         });
+    }
+    {
+        let app = app.clone();
+        let trace = Arc::clone(trace);
+        agent.on_subagent(move |event| {
+            let (title, detail) = subagent_trace_text(event);
+            record_and_emit_agent_event(&app, &trace, TraceEventKind::Subagent, title, detail);
+        });
+    }
+}
+
+fn subagent_trace_text(event: &SubagentEvent) -> (String, String) {
+    match event {
+        SubagentEvent::Started { name, reason } => {
+            (format!("子 Agent {name} 已拉起"), reason.clone())
+        }
+        SubagentEvent::Completed { name, summary } => {
+            (format!("子 Agent {name} 已完成"), summary.clone())
+        }
+        SubagentEvent::Failed { name, error } => (format!("子 Agent {name} 失败"), error.clone()),
     }
 }
 

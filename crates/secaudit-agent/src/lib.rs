@@ -24,7 +24,7 @@ pub mod tools {
 
 pub use agent::state;
 pub use agent::strategy;
-pub use agent::{Agent, AuditReport, Finding};
+pub use agent::{Agent, AuditReport, Finding, SubagentEvent};
 pub use llm::{
     ChatMessage, FunctionCall, HttpLlmClient, Role, TokenUsage, ToolCallResponse, ToolDefinition,
 };

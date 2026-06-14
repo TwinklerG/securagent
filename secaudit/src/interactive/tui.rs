@@ -32,6 +32,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use secaudit_agent::Agent;
+use secaudit_agent::SubagentEvent;
 use secaudit_agent::TokenUsage;
 use secaudit_agent::llm::{self, fetch_context_window};
 use secaudit_agent::state::AgentState;
@@ -366,6 +367,21 @@ impl TuiApp {
     fn push_tool_result(&mut self, name: &str, result: &str) {
         let summary = summarize_tool_result(result);
         self.push_event(EventKind::ToolResult, format!("{name} -> {summary}"));
+    }
+
+    fn push_subagent(&mut self, event: &SubagentEvent) {
+        let text = match event {
+            SubagentEvent::Started { name, reason } => {
+                format!("子 Agent {name} 已拉起：{reason}")
+            }
+            SubagentEvent::Completed { name, summary } => {
+                format!("子 Agent {name} 已完成：{}", first_line(summary))
+            }
+            SubagentEvent::Failed { name, error } => {
+                format!("子 Agent {name} 失败，主 Agent 将继续：{error}")
+            }
+        };
+        self.push_event(EventKind::Subagent, text);
     }
 
     fn push_context_compaction(&mut self, event: &ContextCompressionEvent) {
@@ -1295,6 +1311,12 @@ fn bind_agent_callbacks(agent: &mut Agent, event_tx: &mpsc::UnboundedSender<Work
             });
         });
     }
+    {
+        let tx = event_tx.clone();
+        agent.on_subagent(move |event| {
+            let _ = tx.send(WorkerEvent::Subagent(event.clone()));
+        });
+    }
 }
 
 async fn run_worker(
@@ -1522,6 +1544,7 @@ fn process_worker_events(app: &mut TuiApp, event_rx: &mut mpsc::UnboundedReceive
             }
             WorkerEvent::ToolCall { name, args } => app.push_tool_call(&name, &args),
             WorkerEvent::ToolResult { name, result } => app.push_tool_result(&name, &result),
+            WorkerEvent::Subagent(event) => app.push_subagent(&event),
             WorkerEvent::ContextCompaction(event) => app.push_context_compaction(&event),
             WorkerEvent::ChatDone {
                 response,

@@ -43,7 +43,7 @@ let resizeStartX = 0;
 let resizeStartWidth = 0;
 
 type OpsTabId = "status" | "trace" | "confirm" | "tools" | "findings";
-type TraceFilterId = "all" | "state" | "tool" | "compact" | "error";
+type TraceFilterId = "all" | "state" | "tool" | "subagent" | "compact" | "error";
 type StatusMetric = {
   label: string;
   value: string;
@@ -110,6 +110,7 @@ const TRACE_KIND_LABEL_BY_VALUE: Record<TraceEvent["kind"], string> = {
   tool_call: "调用",
   tool_confirm: "确认",
   tool_result: "结果",
+  subagent: "子任务",
   context_compaction: "压缩",
   error: "错误",
 };
@@ -122,6 +123,7 @@ const TRACE_KIND_BADGE_CLASS_BY_VALUE: Record<TraceEvent["kind"], string> = {
   tool_call: "border-[#b8cec1] bg-[#e5efe7] text-[#2f765e]",
   tool_confirm: "border-[#e1c27c] bg-[#fff1d5] text-[#805100]",
   tool_result: "border-[#b8c8d5] bg-[#e4ecf2] text-[#365d78]",
+  subagent: "border-[#d8c174] bg-[#fff6d6] text-[#79610e]",
   context_compaction: "border-[#b6c7d9] bg-[#e9f0f7] text-[#385f7f]",
   error: "border-[#d8847b] bg-[#fff1ee] text-[#9b2d25]",
 };
@@ -171,7 +173,15 @@ const TRACE_FILTERS: Array<{
   {
     id: "all",
     label: "全部",
-    kinds: ["state", "tool_call", "tool_confirm", "tool_result", "context_compaction", "error"],
+    kinds: [
+      "state",
+      "tool_call",
+      "tool_confirm",
+      "tool_result",
+      "subagent",
+      "context_compaction",
+      "error",
+    ],
   },
   {
     id: "state",
@@ -182,6 +192,11 @@ const TRACE_FILTERS: Array<{
     id: "tool",
     label: "工具",
     kinds: ["tool_call", "tool_confirm", "tool_result"],
+  },
+  {
+    id: "subagent",
+    label: "子任务",
+    kinds: ["subagent"],
   },
   {
     id: "compact",
@@ -438,6 +453,7 @@ function traceItemClass(item: TraceEvent): string {
     tool_call: "border-l-[#2f765e]",
     tool_confirm: "border-l-[#c58a1a]",
     tool_result: "border-l-[#5d6d7d]",
+    subagent: "border-l-[#9b7b19]",
     context_compaction: "border-l-[#4f7ea1]",
     error: "border-l-[#b04435]",
   } satisfies Record<TraceEvent["kind"], string>;

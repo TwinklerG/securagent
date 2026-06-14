@@ -33,6 +33,7 @@ import type {
 const LIVE_ERROR_FALLBACK = "本轮运行失败，详情见运行轨迹和错误提示。";
 const LIVE_PENDING_FALLBACK = "Agent 正在分析当前审计请求。";
 const LIVE_STATE_PREFIX = "Agent 状态";
+const LIVE_SUBAGENT_PREFIX = "子 Agent";
 const LIVE_TOOL_CALL_PREFIX = "正在调用工具";
 const LIVE_TOOL_CONFIRM_PREFIX = "工具请求确认";
 const LIVE_TOOL_RESULT_PREFIX = "已收到工具结果";
@@ -292,6 +293,9 @@ function applyLiveAssistantEvent(event: TraceEvent) {
       break;
     case "tool_result":
       showLiveStatus(`${LIVE_TOOL_RESULT_PREFIX}：${event.title}`);
+      break;
+    case "subagent":
+      showLiveStatus(`${LIVE_SUBAGENT_PREFIX}：${event.title}`);
       break;
     case "state":
       showLiveStatus(`${LIVE_STATE_PREFIX}：${event.title}`);

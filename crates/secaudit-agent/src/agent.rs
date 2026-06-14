@@ -5,6 +5,7 @@ pub mod executor;
 pub(crate) mod skill_tool;
 pub mod state;
 pub mod strategy;
+pub(crate) mod subagent;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use crate::session::Session;
 use crate::tools;
 use crate::tools::{ConfirmFn, Tool};
 use events::EventBus;
+pub use events::SubagentEvent;
 use executor::{
     LlmCallConfig, LlmCallPolicy, ReActExecutor, StepResult, tool_definitions_from_tools,
 };
@@ -228,6 +230,11 @@ impl Agent {
         self.events.on_tool_result(cb);
     }
 
+    /// 设置子 Agent 生命周期事件回调。
+    pub fn on_subagent<F: Fn(&SubagentEvent) + Send + Sync + 'static>(&mut self, cb: F) {
+        self.events.on_subagent(cb);
+    }
+
     /// 获取可用工具名称列表
     #[must_use]
     pub fn tool_names(&self) -> Vec<String> {
@@ -325,6 +332,7 @@ impl Agent {
         self.ensure_chat_system_prompt(session);
         // 追加原始用户消息，保持会话历史与界面展示一致。
         session.push_message(ChatMessage::user(user_message));
+        let agent_input = self.maybe_run_subagent(user_message, agent_input).await;
 
         // 构建 executor 并加载历史；本轮输入使用 Skill 注入后的内容。
         let mut executor =
@@ -399,6 +407,55 @@ impl Agent {
         self.events.set_state(AgentState::Done);
 
         Ok(final_text)
+    }
+
+    async fn maybe_run_subagent(&self, user_message: &str, agent_input: String) -> String {
+        let Some(trigger) = subagent::maybe_trigger(user_message) else {
+            return agent_input;
+        };
+
+        self.events.notify_subagent(&SubagentEvent::Started {
+            name: trigger.name.clone(),
+            reason: trigger.reason.clone(),
+        });
+
+        let tools = subagent::build_tools(
+            &self.work_dir,
+            tools::SensitivePathPolicyConfig {
+                blocklist: self.config.sensitive_path_blocklist.clone(),
+            },
+        );
+        let summary = subagent::run_recon(
+            &self.llm,
+            &tools,
+            self.llm_policy.clone(),
+            &self.work_dir,
+            user_message,
+            |_delta| {},
+            |usage| self.events.notify_usage(usage),
+        )
+        .await;
+
+        match summary {
+            Ok(summary) => {
+                self.events.notify_subagent(&SubagentEvent::Completed {
+                    name: trigger.name,
+                    summary: summary.clone(),
+                });
+                format!(
+                    "以下是自动拉起的侦查子 Agent 摘要，请把它作为本轮任务的前置信息使用。\n\n\
+## 子 Agent 侦查摘要\n{summary}\n\n\
+## 用户原始请求\n{agent_input}"
+                )
+            }
+            Err(error) => {
+                self.events.notify_subagent(&SubagentEvent::Failed {
+                    name: trigger.name,
+                    error: error.to_string(),
+                });
+                agent_input
+            }
+        }
     }
 
     /// 执行安全审计（单文件模式）

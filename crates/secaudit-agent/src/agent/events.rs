@@ -3,6 +3,17 @@
 use super::state::AgentState;
 use crate::llm::{TokenUsage, ToolCallResponse};
 
+/// 子 Agent 生命周期事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentEvent {
+    /// 子 Agent 已经被自动拉起。
+    Started { name: String, reason: String },
+    /// 子 Agent 完成并返回摘要。
+    Completed { name: String, summary: String },
+    /// 子 Agent 失败，主 Agent 会继续处理原始请求。
+    Failed { name: String, error: String },
+}
+
 /// 状态变更回调
 pub type StateCallback = Box<dyn Fn(&AgentState) + Send + Sync>;
 /// 思考过程回调
@@ -15,6 +26,8 @@ pub type UsageCallback = Box<dyn Fn(TokenUsage) + Send + Sync>;
 pub type ToolCallCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// 工具结果回调（工具名, 结果）
 pub type ToolResultCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
+/// 子 Agent 事件回调。
+pub type SubagentCallback = Box<dyn Fn(&SubagentEvent) + Send + Sync>;
 
 /// 事件总线：管理 Agent 状态与回调，独立于 LLM/工具借用。
 #[derive(Default)]
@@ -33,6 +46,8 @@ pub(crate) struct EventBus {
     on_tool_call: Option<ToolCallCallback>,
     /// 工具结果回调
     on_tool_result: Option<ToolResultCallback>,
+    /// 子 Agent 事件回调
+    on_subagent: Option<SubagentCallback>,
 }
 
 impl EventBus {
@@ -72,6 +87,11 @@ impl EventBus {
     /// 设置工具结果回调。
     pub(crate) fn on_tool_result<F: Fn(&str, &str) + Send + Sync + 'static>(&mut self, cb: F) {
         self.on_tool_result = Some(Box::new(cb));
+    }
+
+    /// 设置子 Agent 事件回调。
+    pub(crate) fn on_subagent<F: Fn(&SubagentEvent) + Send + Sync + 'static>(&mut self, cb: F) {
+        self.on_subagent = Some(Box::new(cb));
     }
 
     /// 通知思考内容
@@ -120,6 +140,13 @@ impl EventBus {
     pub(crate) fn notify_tool_results(&self, results: &[(String, String)]) {
         for (name, result) in results {
             self.notify_tool_result(name, result);
+        }
+    }
+
+    /// 通知子 Agent 事件。
+    pub(crate) fn notify_subagent(&self, event: &SubagentEvent) {
+        if let Some(cb) = &self.on_subagent {
+            cb(event);
         }
     }
 }
