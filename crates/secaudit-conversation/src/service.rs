@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::slice;
 
 use chrono::Utc;
-use secaudit_agent::{Agent, ChatMessage, Session};
+use secaudit_agent::{Agent, ChatMessage, HttpLlmClient, Session};
+use secaudit_memory::{FileMemoryStore, Finding, FindingStatus, MemoryStore, ProjectMemory};
 
 use crate::context_compression::{
     CompressedContext, ContextCompressionEvent, ContextCompressionPolicy,
@@ -15,6 +17,9 @@ use crate::model::{
 };
 use crate::sliding_window::SlidingWindowPolicy;
 use crate::storage::ConversationLayout;
+
+/// Short-term sliding window: use the latest N memory records per session.
+const SUMMARIES_WINDOW: usize = 8;
 
 /// 会话服务配置。
 #[derive(Debug, Clone)]
@@ -165,13 +170,15 @@ impl ConversationService {
     /// # Errors
     ///
     /// Agent 执行或保存会话失败时返回错误。
-    pub async fn chat(
+    pub async fn chat<M: MemoryStore>(
         &self,
         agent: &mut Agent,
         managed: &mut ManagedSession,
         user_message: &str,
+        memory: Option<&M>,
+        llm: Option<&HttpLlmClient>,
     ) -> Result<ChatOutcome> {
-        self.chat_with_compression_callback(agent, managed, user_message, |_| {})
+        self.chat_with_compression_callback(agent, managed, user_message, memory, llm, |_| {})
             .await
     }
 
@@ -184,22 +191,34 @@ impl ConversationService {
     /// # Errors
     ///
     /// Agent execution or session persistence failure returns an error.
-    pub async fn chat_with_compression_callback<F>(
+    pub async fn chat_with_compression_callback<M, F>(
         &self,
         agent: &mut Agent,
         managed: &mut ManagedSession,
         user_message: &str,
+        memory: Option<&M>,
+        llm: Option<&HttpLlmClient>,
         mut on_compression: F,
     ) -> Result<ChatOutcome>
     where
+        M: MemoryStore,
         F: FnMut(&ContextCompressionEvent),
     {
+        let memory_context = memory
+            .map(|mem| build_memory_context(mem, managed.id()))
+            .unwrap_or_default();
+
         agent.ensure_chat_system_prompt(managed.session_mut());
         let agent_input = agent.build_chat_agent_input(user_message, managed.id());
         let pending_agent_message = ChatMessage::user(agent_input.clone());
         let mut compressed = self
             .build_active_context_with_pending(managed, slice::from_ref(&pending_agent_message));
         self.apply_llm_summary(agent, &mut compressed).await;
+        if !memory_context.is_empty() {
+            compressed
+                .messages
+                .push(ChatMessage::system(memory_context));
+        }
         let mut compression = compressed.event.clone();
         if let Some(event) = &mut compression {
             let after_usage = estimate_with_pending(
@@ -261,6 +280,19 @@ impl ConversationService {
             }
         }
         self.config.storage.save_session(managed)?;
+
+        if let Some(mem) = memory
+            && let Some(client) = llm
+        {
+            let result = compress_response(client, &response).await;
+            if !result.summary.is_empty() {
+                mem.record_chat(managed.id(), &result.summary, result.importance)?;
+            }
+            if !result.findings.is_empty() {
+                mem.merge_to_long_term(managed.id(), &result.findings)?;
+            }
+        }
+
         Ok(ChatOutcome {
             response,
             compression,
@@ -299,6 +331,53 @@ impl ConversationService {
         self.config.storage.save_session(managed)?;
 
         Ok(CompactOutcome { compression })
+    }
+
+    /// 创建项目关联的 Memory 存储。
+    ///
+    /// # Errors
+    ///
+    /// 项目初始化失败时返回错误。
+    pub fn create_memory_store(&self, work_dir: &Path) -> Result<FileMemoryStore> {
+        let project = self.config.storage.ensure_project(work_dir)?;
+        Ok(FileMemoryStore::new(
+            self.config.storage.memory_dir(&project.project_key),
+        ))
+    }
+
+    /// 完成会话记忆最终化：将 L1 摘要拼接为 L2 文本总结，聚合 L3 项目知识。
+    ///
+    /// # Errors
+    ///
+    /// Memory 读写失败时返回错误。
+    pub fn finalize_session<M: MemoryStore>(memory: &M, session_id: &str) -> Result<()> {
+        let records = memory.recent_by_session(session_id, usize::MAX)?;
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let content: Vec<&str> = records
+            .iter()
+            .rev()
+            .map(|r| r.content.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let summary_text = content.join("\n");
+
+        if !summary_text.is_empty() {
+            memory.finalize_long_term(session_id, &summary_text)?;
+        }
+
+        let all = memory.all_summaries()?;
+        if let Some(current) = all.iter().find(|s| s.session_id == session_id)
+            && !current.findings.is_empty()
+        {
+            aggregate_project_knowledge(memory, &current.findings)?;
+        }
+
+        memory.clear_short_term(session_id)?;
+
+        Ok(())
     }
 
     /// 保存当前会话。
@@ -420,6 +499,244 @@ fn estimate_with_pending(
     estimator.estimate(&combined)
 }
 
+fn build_memory_context<M: MemoryStore>(store: &M, session_id: &str) -> String {
+    let mut parts = Vec::new();
+
+    match store.recent_by_session(session_id, SUMMARIES_WINDOW) {
+        Ok(records) => {
+            if !records.is_empty() {
+                let lines: Vec<String> = records
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| format!("[{}] {}", i + 1, r.content))
+                    .collect();
+                parts.push(format!(
+                    "【本会话最近 {} 条记录】\n{}",
+                    records.len(),
+                    lines.join("\n")
+                ));
+            }
+        }
+        Err(e) => tracing::warn!("[memory] short-term 读取失败: {e}"),
+    }
+
+    match store.all_summaries() {
+        Ok(summaries) => {
+            let others: Vec<_> = summaries
+                .iter()
+                .filter(|s| s.session_id != session_id)
+                .collect();
+            if !others.is_empty() {
+                let lines: Vec<String> = others
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "会话 {}: {}",
+                            &s.session_id[..s.session_id.len().min(8)],
+                            s.content
+                        )
+                    })
+                    .collect();
+                parts.push(format!(
+                    "【历史 {} 个会话总结】\n{}",
+                    others.len(),
+                    lines.join("\n")
+                ));
+            }
+        }
+        Err(e) => tracing::warn!("[memory] long-term 读取失败: {e}"),
+    }
+
+    match store.project_facts() {
+        Ok(facts) => {
+            if !facts.is_empty() {
+                let lines: Vec<String> = facts
+                    .iter()
+                    .map(|f| format!("- {}: {}", f.key, f.content))
+                    .collect();
+                parts.push(format!("【项目知识】\n{}", lines.join("\n")));
+            }
+        }
+        Err(e) => tracing::warn!("[memory] project facts 读取失败: {e}"),
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "【审计上下文 - 以下为系统内部参考信息，请勿直接复述】\n\n{}\n\n---\n基于以上上下文继续审计。",
+        parts.join("\n\n")
+    )
+}
+
+fn aggregate_project_knowledge<M: ProjectMemory>(memory: &M, findings: &[Finding]) -> Result<()> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+
+    let mut cwe_counts: HashMap<String, usize> = HashMap::new();
+    let mut file_findings: HashMap<String, Vec<String>> = HashMap::new();
+
+    for finding in findings {
+        if let Some(cwe) = &finding.cwe_id {
+            *cwe_counts.entry(cwe.clone()).or_insert(0) += 1;
+        }
+        if let Some(file) = &finding.file_path {
+            file_findings.entry(file.clone()).or_default().push(format!(
+                "{} ({})",
+                finding.cwe_id.as_deref().unwrap_or("?"),
+                finding.status
+            ));
+        }
+    }
+
+    if !cwe_counts.is_empty() {
+        let stats = serde_json::to_string(&cwe_counts).unwrap_or_default();
+        if let Ok(existing) = memory.project_facts()
+            && let Some(old_stats) = existing.iter().find(|f| f.key == "cwe_stats")
+            && let Ok(mut merged) =
+                serde_json::from_str::<HashMap<String, usize>>(&old_stats.content)
+        {
+            for (cwe, count) in &cwe_counts {
+                *merged.entry(cwe.clone()).or_insert(0) += count;
+            }
+            let merged_json = serde_json::to_string(&merged).unwrap_or_default();
+            memory.upsert_project_fact("cwe_stats", &merged_json)?;
+        } else {
+            memory.upsert_project_fact("cwe_stats", &stats)?;
+        }
+    }
+
+    for (file, items) in &file_findings {
+        let key = format!("file:{file}");
+        let new_content = items.join("; ");
+
+        let merged = if let Ok(facts) = memory.project_facts()
+            && let Some(old) = facts.iter().find(|f| f.key == key)
+        {
+            let mut all: Vec<&str> = old.content.split("; ").filter(|s| !s.is_empty()).collect();
+            for item in new_content.split("; ").filter(|s| !s.is_empty()) {
+                if !all.contains(&item) {
+                    all.push(item);
+                }
+            }
+            all.join("; ")
+        } else {
+            new_content
+        };
+
+        memory.upsert_project_fact(&key, &merged)?;
+    }
+
+    Ok(())
+}
+
+struct CompressResult {
+    summary: String,
+    importance: f64,
+    findings: Vec<Finding>,
+}
+
+async fn compress_response(client: &HttpLlmClient, response: &str) -> CompressResult {
+    let prompt = r#"你是审计发现提取器。对审计回复，提取关键发现。
+
+输出 JSON（不要输出其他内容）：
+{
+  "summary": "一行中文摘要",
+  "importance": 2.0,
+  "findings": [
+    {"cwe_id": "CWE-89", "file_path": "src/auth.py", "line": 12, "status": "fixed"}
+  ]
+}
+
+importance 取值: 含漏洞发现 -> 2.0~5.0, 纯信息 -> 1.0, 无关键发现 -> 0.3
+status 取值: fixed / pending / confirmed / false_positive / needs_analysis
+如无任何发现，findings 为空数组 []。"#;
+    let messages = [
+        ChatMessage::system(prompt),
+        ChatMessage::user(response.to_owned()),
+    ];
+    let raw = client
+        .chat(&messages, None)
+        .await
+        .map(|msg| msg.content.unwrap_or_default())
+        .unwrap_or_default();
+
+    if raw.is_empty() {
+        tracing::warn!("[memory] compress_response LLM 返回空内容，本轮发现未记录");
+    }
+
+    parse_compress_json(&raw)
+}
+
+fn parse_compress_json(raw: &str) -> CompressResult {
+    let json_str = raw
+        .strip_prefix("```json")
+        .and_then(|s| s.strip_suffix("```"))
+        .or_else(|| {
+            let s = raw.strip_prefix("```")?;
+            s.strip_suffix("```")
+        })
+        .unwrap_or(raw)
+        .trim();
+
+    match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(val) => {
+            let summary = val
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let importance = val
+                .get("importance")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(1.0);
+            let findings: Vec<Finding> = val
+                .get("findings")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|finding| {
+                            let status = finding
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(FindingStatus::Pending);
+                            Finding {
+                                cwe_id: finding
+                                    .get("cwe_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                file_path: finding
+                                    .get("file_path")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                line: finding
+                                    .get("line")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .map(|v| v as u32),
+                                status,
+                                timestamp: Utc::now().to_rfc3339(),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            CompressResult {
+                summary,
+                importance,
+                findings,
+            }
+        }
+        Err(_) => CompressResult {
+            summary: raw.to_owned(),
+            importance: 0.3,
+            findings: Vec::new(),
+        },
+    }
+}
+
 fn sync_new_messages(full: &mut Session, context: &Session, context_original_len: usize) {
     let appended_count = context
         .messages()
@@ -468,6 +785,9 @@ mod tests {
     use std::fs;
 
     use secaudit_agent::ChatMessage;
+    use secaudit_memory::{
+        FileMemoryStore, Finding, FindingStatus, LongTermMemory, ProjectMemory, ShortTermMemory,
+    };
     use tempfile::TempDir;
 
     use super::{ConversationConfig, ConversationService};
@@ -596,5 +916,151 @@ mod tests {
             active_usage.used_tokens < full_usage.used_tokens,
             "active context should be smaller after compression"
         );
+    }
+
+    #[test]
+    fn parse_valid_compress_json() {
+        let raw = r#"{"summary": "发现 SQL 注入", "importance": 3.0, "findings": [{"cwe_id": "CWE-89", "file_path": "src/auth.py", "line": 12, "status": "fixed"}]}"#;
+        let result = super::parse_compress_json(raw);
+
+        assert_eq!(result.summary, "发现 SQL 注入");
+        assert!((result.importance - 3.0).abs() < f64::EPSILON);
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].cwe_id.as_deref(), Some("CWE-89"));
+        assert_eq!(result.findings[0].status, FindingStatus::Fixed);
+    }
+
+    #[test]
+    fn parse_compress_json_with_markdown_fence() {
+        let raw = "```json\n{\"summary\": \"ok\", \"importance\": 1.0, \"findings\": []}\n```";
+        let result = super::parse_compress_json(raw);
+
+        assert_eq!(result.summary, "ok");
+        assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn parse_compress_json_fallback_on_invalid() {
+        let raw = "这不是有效的 JSON";
+        let result = super::parse_compress_json(raw);
+
+        assert_eq!(result.summary, raw);
+        assert!((result.importance - 0.3).abs() < f64::EPSILON);
+        assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn parse_compress_json_unknown_status_defaults_to_pending() {
+        let raw = r#"{"summary": "x", "importance": 1.0, "findings": [{"cwe_id": "CWE-89", "file_path": "a.py", "status": "unknown_status"}]}"#;
+        let result = super::parse_compress_json(raw);
+
+        assert_eq!(result.findings[0].status, FindingStatus::Pending);
+    }
+
+    #[test]
+    fn aggregate_cwe_stats_accumulates() {
+        let temp = TempDir::new().expect("create tempdir");
+        let store = FileMemoryStore::new(temp.path().join("memory"));
+
+        let findings = vec![
+            Finding {
+                cwe_id: Some("CWE-89".into()),
+                file_path: Some("a.py".into()),
+                line: None,
+                status: FindingStatus::Fixed,
+                timestamp: "t1".into(),
+            },
+            Finding {
+                cwe_id: Some("CWE-89".into()),
+                file_path: Some("b.py".into()),
+                line: None,
+                status: FindingStatus::Pending,
+                timestamp: "t2".into(),
+            },
+            Finding {
+                cwe_id: Some("CWE-79".into()),
+                file_path: None,
+                line: None,
+                status: FindingStatus::Confirmed,
+                timestamp: "t3".into(),
+            },
+        ];
+
+        super::aggregate_project_knowledge(&store, &findings).expect("aggregate");
+        let facts = store.project_facts().expect("read");
+
+        assert!(facts.iter().any(|fact| fact.key == "cwe_stats"));
+        assert!(facts.iter().any(|fact| fact.key == "file:a.py"));
+    }
+
+    #[test]
+    fn full_pipeline_finalize_and_cross_session_context() {
+        let temp = TempDir::new().expect("create tempdir");
+        let store = FileMemoryStore::new(temp.path().join("memory"));
+
+        let session_1 = "session-1";
+        let session_2 = "session-2";
+
+        store
+            .record_chat(session_1, "CWE-89 SQL注入 @ auth.py (已修复)", 2.0)
+            .expect("L1");
+        store
+            .merge_to_long_term(
+                session_1,
+                &[Finding {
+                    cwe_id: Some("CWE-89".into()),
+                    file_path: Some("auth.py".into()),
+                    line: Some(12),
+                    status: FindingStatus::Fixed,
+                    timestamp: "t1".into(),
+                }],
+            )
+            .expect("L2");
+        store
+            .record_chat(session_1, "CWE-79 XSS @ utils.py (待修复)", 2.0)
+            .expect("L1");
+        store
+            .merge_to_long_term(
+                session_1,
+                &[Finding {
+                    cwe_id: Some("CWE-79".into()),
+                    file_path: Some("utils.py".into()),
+                    line: Some(45),
+                    status: FindingStatus::Pending,
+                    timestamp: "t2".into(),
+                }],
+            )
+            .expect("L2");
+
+        ConversationService::finalize_session(&store, session_1).expect("finalize s1");
+
+        let summaries = store.all_summaries().expect("read L2");
+        assert_eq!(summaries.len(), 1);
+        let s1_summary = &summaries[0];
+        assert_eq!(s1_summary.session_id, session_1);
+        assert!(s1_summary.content.contains("CWE-89"));
+        assert!(s1_summary.content.contains("CWE-79"));
+        assert_eq!(s1_summary.findings.len(), 2);
+
+        let facts = store.project_facts().expect("read L3");
+        assert!(facts.iter().any(|fact| fact.key == "cwe_stats"));
+        assert!(facts.iter().any(|fact| fact.key.starts_with("file:")));
+
+        let ctx = super::build_memory_context(&store, session_2);
+        assert!(ctx.contains("历史"));
+        assert!(ctx.contains("CWE-89"));
+        assert!(ctx.contains("项目知识"));
+        assert!(ctx.contains("cwe_stats"));
+    }
+
+    #[test]
+    fn finalize_empty_session_returns_ok() {
+        let temp = TempDir::new().expect("create tempdir");
+        let store = FileMemoryStore::new(temp.path().join("memory"));
+
+        let result = ConversationService::finalize_session(&store, "empty-session");
+        result.expect("empty session finalize should succeed");
+        let summaries = store.all_summaries().expect("read L2");
+        assert!(summaries.is_empty());
     }
 }

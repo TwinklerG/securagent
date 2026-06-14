@@ -9,10 +9,12 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
 ] }
 secaudit-agent = { path = "../secaudit-agent" }
+secaudit-memory = { path = "../secaudit-memory" }
 secaudit-storage = { path = "../secaudit-storage" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing = "0.1"
 tiktoken = "3"
 uuid = { version = "1", features = ["v4"] }
 

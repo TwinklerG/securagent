@@ -5,12 +5,14 @@ use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError, Sender as StdSender};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use secaudit_agent::{Agent, ChatMessage, Role, TokenUsage};
+use secaudit_agent::llm;
+use secaudit_agent::{Agent, ChatMessage, HttpLlmClient, Role, TokenUsage};
 use secaudit_conversation::{
     ContextCompressionEvent, ConversationConfig, ConversationService, ManagedSession,
     SessionListItem, SessionManagementInfo, SessionPreviewRole, SessionStatus,
 };
 use secaudit_core::Config;
+use secaudit_memory::FileMemoryStore;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
@@ -92,6 +94,8 @@ pub(crate) struct GuiRuntime {
     conversation: ConversationService,
     session: ManagedSession,
     agent: Option<Agent>,
+    memory: Option<FileMemoryStore>,
+    llm_client: Option<HttpLlmClient>,
     config_error: Option<String>,
     model: Option<String>,
     run_phase: RunPhase,
@@ -316,13 +320,20 @@ impl GuiRuntime {
         let trace = new_trace_buffer();
         approvals.attach_trace(Arc::clone(&trace));
         let model = config.as_ref().ok().map(|config| config.model.clone());
-        let (agent, config_error) = build_agent(app, work_dir.clone(), &trace, &approvals, config);
+        let (agent, llm_client, config_error) =
+            build_agent(app, work_dir.clone(), &trace, &approvals, config);
+        let memory = conversation
+            .create_memory_store(work_dir.as_path())
+            .ok()
+            .filter(|_| agent.is_some());
         let run_phase = idle_run_phase(agent.is_some());
         let mut runtime = Self {
             work_dir,
             conversation,
             session,
             agent,
+            memory,
+            llm_client,
             config_error,
             model,
             run_phase,
@@ -395,7 +406,13 @@ impl GuiRuntime {
         self.run_phase = RunPhase::Running;
         let chat_result = self
             .conversation
-            .chat(agent, &mut self.session, &message)
+            .chat(
+                agent,
+                &mut self.session,
+                &message,
+                self.memory.as_ref(),
+                self.llm_client.as_ref(),
+            )
             .await;
         self.run_phase = self.current_idle_run_phase();
 
@@ -420,6 +437,10 @@ impl GuiRuntime {
     }
 
     pub(crate) fn new_session(&mut self) -> Result<AgentWorkbench, String> {
+        if let Some(mem) = self.memory.as_ref() {
+            let _ = ConversationService::finalize_session(mem, self.session.id())
+                .inspect_err(|e| tracing::warn!("[memory] 会话总结失败: {e}"));
+        }
         let session = self.conversation.start_session(self.work_dir.as_path());
         self.session = self.trace_result("创建会话失败", session)?;
         clear_trace(&self.trace);
@@ -428,6 +449,10 @@ impl GuiRuntime {
     }
 
     pub(crate) fn switch_session(&mut self, session_id: &str) -> Result<AgentWorkbench, String> {
+        if let Some(mem) = self.memory.as_ref() {
+            let _ = ConversationService::finalize_session(mem, self.session.id())
+                .inspect_err(|e| tracing::warn!("[memory] 会话总结失败: {e}"));
+        }
         let session = self
             .conversation
             .load_session(self.work_dir.as_path(), session_id);
@@ -471,6 +496,10 @@ impl GuiRuntime {
                 return Err(message);
             }
         };
+        if let Some(mem) = self.memory.as_ref() {
+            let _ = ConversationService::finalize_session(mem, self.session.id())
+                .inspect_err(|e| tracing::warn!("[memory] 会话总结失败: {e}"));
+        }
         let config = load_agent_config();
         let conversation = self.trace_result(
             TRACE_TITLE_WORK_DIR_SWITCH_FAILED,
@@ -479,12 +508,18 @@ impl GuiRuntime {
         let session = conversation.start_session(work_dir.as_path());
         let session = self.trace_result(TRACE_TITLE_WORK_DIR_SWITCH_FAILED, session)?;
         let model = config.as_ref().ok().map(|config| config.model.clone());
-        let (agent, config_error) =
+        let (agent, llm_client, config_error) =
             build_agent(app, work_dir.clone(), &self.trace, &self.approvals, config);
+        let memory = conversation
+            .create_memory_store(work_dir.as_path())
+            .ok()
+            .filter(|_| agent.is_some());
         self.work_dir = work_dir;
         self.conversation = conversation;
         self.session = session;
         self.agent = agent;
+        self.memory = memory;
+        self.llm_client = llm_client;
         self.config_error = config_error;
         self.model = model;
         self.run_phase = self.current_idle_run_phase();
@@ -643,11 +678,13 @@ fn build_agent(
     trace: &SharedTrace,
     approvals: &CommandApprovalBroker,
     config: Result<Config, String>,
-) -> (Option<Agent>, Option<String>) {
+) -> (Option<Agent>, Option<HttpLlmClient>, Option<String>) {
     let config = match config {
         Ok(config) => config,
-        Err(error) => return (None, Some(format!("{MSG_CONFIG_HINT} 原因：{error}"))),
+        Err(error) => return (None, None, Some(format!("{MSG_CONFIG_HINT} 原因：{error}"))),
     };
+
+    let llm_client = llm::create_client(&config);
 
     let app_for_confirm = app.clone();
     let trace_for_confirm = Arc::clone(trace);
@@ -658,7 +695,7 @@ fn build_agent(
 
     let mut agent = Agent::new(config, work_dir, confirm);
     bind_agent_events(&mut agent, app, trace);
-    (Some(agent), None)
+    (Some(agent), Some(llm_client), None)
 }
 
 fn load_agent_config() -> Result<Config, String> {

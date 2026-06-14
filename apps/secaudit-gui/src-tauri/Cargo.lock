@@ -3272,11 +3272,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "secaudit-agent",
+ "secaudit-memory",
  "secaudit-storage",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tiktoken",
+ "tracing",
  "uuid",
 ]
 
@@ -3300,12 +3302,14 @@ dependencies = [
  "secaudit-agent",
  "secaudit-conversation",
  "secaudit-core",
+ "secaudit-memory",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
+ "tracing",
  "ts-rs",
 ]
 
@@ -3319,6 +3323,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "secaudit-memory"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

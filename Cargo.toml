@@ -8,6 +8,7 @@ members = [
     "crates/secaudit-agent",
     "crates/secaudit-storage",
     "crates/secaudit-conversation",
+    "crates/secaudit-memory",
     "crates/secaudit-skills",
 ]
 

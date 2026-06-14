@@ -33,9 +33,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use secaudit_agent::Agent;
 use secaudit_agent::TokenUsage;
-use secaudit_agent::llm::fetch_context_window;
+use secaudit_agent::llm::{self, fetch_context_window};
 use secaudit_agent::state::AgentState;
-use secaudit_conversation::{ContextCompressionEvent, ContextUsage, SessionListItem};
+use secaudit_conversation::{
+    ContextCompressionEvent, ContextUsage, ConversationService, SessionListItem,
+};
 use secaudit_core::Config;
 use tokio::sync::mpsc;
 
@@ -1312,6 +1314,7 @@ async fn run_worker(
             .await
             .unwrap_or(config.context_window_tokens)
     };
+    let llm_client = llm::create_client(&config);
     let mut agent = Agent::new(config, work_dir.clone(), cli_confirm(event_tx.clone()));
     bind_agent_callbacks(&mut agent, &event_tx);
 
@@ -1330,6 +1333,14 @@ async fn run_worker(
         Err(error) => {
             let _ = event_tx.send(WorkerEvent::Error(format!("会话创建失败：{error}")));
             return;
+        }
+    };
+
+    let memory = match conversation.create_memory_store(work_dir.as_path()) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            let _ = event_tx.send(WorkerEvent::Error(format!("Memory 鍒濆鍖栧け璐? {error}")));
+            None
         }
     };
 
@@ -1354,6 +1365,8 @@ async fn run_worker(
                         &mut agent,
                         &mut session,
                         &request.input,
+                        memory.as_ref(),
+                        Some(&llm_client),
                         move |compression| {
                             let _ = compaction_tx
                                 .send(WorkerEvent::ContextCompaction(compression.clone()));
@@ -1387,6 +1400,10 @@ async fn run_worker(
                 });
             }
             WorkerCommand::NewSession => {
+                if let Some(mem) = memory.as_ref() {
+                    let _ = ConversationService::finalize_session(mem, session.id())
+                        .inspect_err(|e| tracing::warn!("[memory] 会话总结失败: {e}"));
+                }
                 match start_worker_session(&conversation, work_dir.as_path()) {
                     Ok(new_session) => {
                         session = new_session;
@@ -1423,6 +1440,10 @@ async fn run_worker(
                 match super::resolve_session_selector(&conversation, work_dir.as_path(), &selector)
                 {
                     Ok(session_id) => {
+                        if let Some(mem) = memory.as_ref() {
+                            let _ = ConversationService::finalize_session(mem, session.id())
+                                .inspect_err(|e| tracing::warn!("[memory] 会话总结失败: {e}"));
+                        }
                         match conversation.load_session(work_dir.as_path(), &session_id) {
                             Ok(loaded_session) => {
                                 session = loaded_session;
@@ -1453,6 +1474,10 @@ async fn run_worker(
                 });
             }
             WorkerCommand::Shutdown => {
+                if let Some(mem) = memory.as_ref() {
+                    let _ = ConversationService::finalize_session(mem, session.id())
+                        .inspect_err(|e| tracing::warn!("[memory] 会话总结失败: {e}"));
+                }
                 break;
             }
         }

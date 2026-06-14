@@ -46,6 +46,10 @@ pub enum Error {
     /// IO 失败。
     #[error("IO 错误：{0}")]
     Io(#[from] io::Error),
+
+    /// Memory 操作失败。
+    #[error("Memory 错误：{0}")]
+    Memory(#[from] secaudit_memory::Error),
 }
 
 /// crate 内统一 Result 类型。

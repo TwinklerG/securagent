@@ -19,7 +19,8 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
 use secaudit_agent::strategy;
-use secaudit_agent::{Agent, to_multi_turn_sample};
+use secaudit_agent::{Agent, llm, to_multi_turn_sample};
+use secaudit_conversation::ConversationService;
 use secaudit_core::Config;
 use secaudit_storage::LOGS_DIR;
 use secaudit_storage::RUNTIME_DIR;
@@ -267,6 +268,7 @@ async fn run_single_file(cli: &Cli, mut config: Config, target: &str) {
 }
 
 /// 非交互 chat 模式：执行一轮或多轮对话并输出结构化结果。
+#[expect(clippy::too_many_lines)]
 async fn run_headless_chat(cli: &Cli, config: Config) {
     let work_dir = current_work_dir();
     let work_dir_display = work_dir.display().to_string();
@@ -282,8 +284,16 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
     let confirm_mode_name = headless::confirm_mode_name(confirm_mode).to_owned();
     let confirm = headless::build_confirm_callback(confirm_mode, recorder.clone());
 
+    let llm_client = llm::create_client(&config);
     let mut agent = Agent::new(config, work_dir.clone(), confirm);
     recorder.attach(&mut agent);
+    let memory = match conversation.create_memory_store(&work_dir) {
+        Ok(store) => Some(store),
+        Err(e) => {
+            eprintln!("[memory] 初始化失败: {e}");
+            None
+        }
+    };
     let mut managed_session =
         match headless::load_or_start_session(&conversation, &work_dir, cli.session.as_deref()) {
             Ok(session) => session,
@@ -301,7 +311,13 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
     for (index, user_message) in inputs.iter().enumerate() {
         let turn_start = Instant::now();
         match conversation
-            .chat(&mut agent, &mut managed_session, user_message)
+            .chat(
+                &mut agent,
+                &mut managed_session,
+                user_message,
+                memory.as_ref(),
+                Some(&llm_client),
+            )
             .await
         {
             Ok(outcome) => {
@@ -337,6 +353,13 @@ async fn run_headless_chat(cli: &Cli, config: Config) {
                 break;
             }
         }
+    }
+
+    // 会话结束：最终化 L2 + L3
+    if let (Some(mem), true) = (memory.as_ref(), failure.is_none())
+        && let Err(e) = ConversationService::finalize_session(mem, managed_session.id())
+    {
+        eprintln!("[memory] 会话总结失败: {e}");
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
