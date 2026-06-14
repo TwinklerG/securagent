@@ -1,0 +1,38 @@
+# SecurAgent VS Code Extension - Justfile
+
+# Install dependencies
+install:
+    npm install
+
+# Update dependencies
+update:
+    npm update
+
+# Compile TypeScript (development build)
+compile: install
+    npm run compile
+
+# Watch and auto-recompile TypeScript (development mode)
+watch: install
+    npm run watch
+
+# Type check without emitting files
+lint: install
+    npm run lint
+
+# Bundle extension with esbuild for production
+bundle: install
+    npm run bundle
+
+# Check if the bundled binary exists
+check-binary:
+    npm run check-binary
+
+prepare-binary:
+    cargo build --release --bin secaudit
+    mkdir -p bin
+    cp ../target/release/secaudit bin/
+
+# Full package build (bundle + check binary + create .vsix)
+package:
+    npm run package

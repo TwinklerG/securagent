@@ -1,0 +1,10 @@
+node_modules/**
+.gitignore
+.vscodeignore
+package-lock.json
+tsconfig.json
+src/**
+out/**/*.map
+
+# Include bundled binaries
+!bin/**

@@ -1,0 +1,202 @@
+{
+  "name": "securagent-vscode",
+  "displayName": "SecurAgent",
+  "description": "Run securagent security audits from VS Code.",
+  "version": "0.1.0",
+  "publisher": "securagent",
+  "repository": {
+    "url": "https://git.nju.edu.cn/2026seiii-047-agentclaw/securagent",
+    "directory": "vscode-extension",
+    "type": "git"
+  },
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "securagent",
+          "title": "SecurAgent",
+          "icon": "$(shield)"
+        }
+      ]
+    },
+    "views": {
+      "securagent": [
+        {
+          "type": "webview",
+          "id": "securagent.chatView",
+          "name": "Chat",
+          "icon": ""
+        },
+        {
+          "id": "securagent.auditHistory",
+          "name": "Audit History",
+          "icon": ""
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "securagent.startAudit",
+        "title": "SecurAgent: Start Audit",
+        "category": "SecurAgent",
+        "icon": "$(play)"
+      },
+      {
+        "command": "securagent.auditCurrentFile",
+        "title": "SecurAgent: Audit Current File",
+        "category": "SecurAgent",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "securagent.auditWorkspace",
+        "title": "SecurAgent: Audit Workspace",
+        "category": "SecurAgent",
+        "icon": "$(shield-filled)"
+      },
+      {
+        "command": "securagent.configure",
+        "title": "SecurAgent: Configure",
+        "category": "SecurAgent",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "securagent.openOutput",
+        "title": "SecurAgent: Open Output",
+        "category": "SecurAgent",
+        "icon": "$(output)"
+      },
+      {
+        "command": "securagent.showAuditResult",
+        "title": "SecurAgent: Show Audit Result",
+        "category": "SecurAgent"
+      },
+      {
+        "command": "securagent.goToLocation",
+        "title": "SecurAgent: Go to Location",
+        "category": "SecurAgent"
+      }
+    ],
+    "configuration": {
+      "title": "SecurAgent",
+      "properties": {
+        "securagent.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a custom secaudit executable. Leave empty to use the bundled binary (recommended)."
+        },
+        "securagent.repositoryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the securagent Rust repository (fallback for cargo run). Not needed when using the bundled binary."
+        },
+        "securagent.cargoPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to cargo (fallback for cargo run). Not needed when using the bundled binary."
+        },
+        "securagent.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key passed as `SECAUDIT_API_KEY`. Prefer User settings or environment variables for secrets."
+        },
+        "securagent.apiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API base URL passed as SECAUDIT_API_BASE_URL."
+        },
+        "securagent.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model name passed as SECAUDIT_MODEL."
+        },
+        "securagent.strategy": {
+          "type": "string",
+          "enum": [
+            "react",
+            "reflexion"
+          ],
+          "default": "react",
+          "description": "Reasoning strategy used for single-file audits."
+        },
+        "securagent.confirmMode": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "default": "deny",
+          "description": "Confirmation policy for workspace chat audits. `deny` avoids file writes and shell execution by default."
+        },
+        "securagent.workspacePrompt": {
+          "type": "string",
+          "default": "Audit the current workspace for high-priority security risks. Focus on concrete vulnerabilities, affected files, exploitability, and suggested fixes.",
+          "description": "Prompt used by SecurAgent: Audit Workspace."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "securagent.startAudit",
+          "group": "navigation@49"
+        },
+        {
+          "command": "securagent.auditCurrentFile",
+          "group": "navigation@50"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "securagent.auditCurrentFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@50"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "securagent.startAudit"
+        },
+        {
+          "command": "securagent.auditCurrentFile"
+        },
+        {
+          "command": "securagent.auditWorkspace"
+        },
+        {
+          "command": "securagent.configure"
+        },
+        {
+          "command": "securagent.openOutput"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc --noEmit",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=out/extension.js --external:vscode --sourcemap",
+    "check-binary": "node -e \"const fs=require('fs'),p=require('path'),b=p.join(__dirname,'bin',process.platform==='win32'?'secaudit.exe':'secaudit');if(!fs.existsSync(b)){console.error('ERROR: bundled binary not found at '+b);console.error('Build secaudit first or set securagent.executablePath in settings.');process.exit(1);}console.log('OK: '+b);\"",
+    "package": "npm run bundle && npm run check-binary && npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/marked": "^6.0.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.86.0",
+    "@vscode/vsce": "^2.15.0",
+    "esbuild": "^0.28.0",
+    "marked": "^18.0.4",
+    "typescript": "^5.0.0"
+  }
+}
