@@ -20,7 +20,7 @@ use crate::dto::{
     AgentEvent, AgentWorkbench, CommandApprovalRequest, CommandApprovalResolution,
     ConversationPanel, FindingEvidence, FindingPreview, FindingSeverity, FindingStatus,
     GuiContextUsage, GuiMessage, GuiSessionListItem, GuiTokenUsage, ProjectPanel, RunPanel,
-    RunPhase, StatusPanel, TraceEvent, TraceEventKind,
+    RunPhase, SkillCapability, StatusPanel, TraceEvent, TraceEventKind,
 };
 use crate::tools::tool_capabilities;
 
@@ -106,6 +106,7 @@ pub(crate) struct GuiRuntime {
 #[derive(Debug, Clone, Copy)]
 struct StatusCounts {
     trace: usize,
+    skill: usize,
     tool: usize,
     finding: usize,
 }
@@ -358,6 +359,7 @@ impl GuiRuntime {
             .unwrap_or_default();
         let sessions = with_current_session_item(sessions, &self.session);
         let messages = GuiMessage::from_agent_history(self.session.session().messages());
+        let skills = skill_capabilities(self.agent.as_ref());
         let tools = tool_capabilities(self.agent.as_ref(), &self.work_dir);
         let trace = trace_snapshot(&self.trace);
         let findings = finding_previews(self.session.session().messages());
@@ -365,6 +367,7 @@ impl GuiRuntime {
             &management,
             StatusCounts {
                 trace: trace.len(),
+                skill: skills.len(),
                 tool: tools.len(),
                 finding: findings.len(),
             },
@@ -385,6 +388,7 @@ impl GuiRuntime {
             },
             run: self.run_panel(),
             status,
+            skills,
             tools,
             trace,
             findings,
@@ -577,6 +581,7 @@ impl GuiRuntime {
             active_context: GuiContextUsage::from_context_usage(&active_context),
             message_count: self.session.session().messages().len(),
             trace_count: counts.trace,
+            skill_count: counts.skill,
             tool_count: counts.tool,
             finding_count: counts.finding,
         }
@@ -710,6 +715,20 @@ fn build_conversation(config: Option<&Config>) -> Result<ConversationService, St
         None => ConversationConfig::default_storage().map_err(to_error_text)?,
     };
     Ok(ConversationService::new(conversation_config))
+}
+
+fn skill_capabilities(agent: Option<&Agent>) -> Vec<SkillCapability> {
+    agent.map_or_else(Vec::new, |agent| {
+        agent
+            .skill_list()
+            .into_iter()
+            .map(|(name, description)| SkillCapability {
+                command: format!("/{name}"),
+                name,
+                description,
+            })
+            .collect()
+    })
 }
 
 fn bind_agent_events(agent: &mut Agent, app: &AppHandle, trace: &SharedTrace) {

@@ -2,4 +2,4 @@
 import type { GuiContextUsage } from "./GuiContextUsage";
 import type { GuiTokenUsage } from "./GuiTokenUsage";
 
-export type StatusPanel = { agentLabel: string, model: string, sessionStatus: string, sessionPath: string, context: GuiContextUsage, activeContext: GuiContextUsage, tokenUsage: GuiTokenUsage, messageCount: number, traceCount: number, toolCount: number, findingCount: number, };
+export type StatusPanel = { agentLabel: string, model: string, sessionStatus: string, sessionPath: string, context: GuiContextUsage, activeContext: GuiContextUsage, tokenUsage: GuiTokenUsage, messageCount: number, traceCount: number, skillCount: number, toolCount: number, findingCount: number, };

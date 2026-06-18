@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::error::Error;
@@ -16,6 +15,7 @@ use crate::tools::{ConfirmFn, Tool};
 
 pub use self::policy::CommandPolicyConfig;
 use self::policy::{CommandDecision, CommandPolicy};
+use super::process::hidden_command;
 
 // —— 工具元信息 ——
 
@@ -185,7 +185,7 @@ impl Tool for ExecuteCommand {
             CommandDecision::Allow => {}
         }
 
-        let child = Command::new(SHELL)
+        let child = hidden_command(SHELL)
             .arg(SHELL_FLAG)
             .arg(command)
             .current_dir(&self.work_dir)

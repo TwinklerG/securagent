@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use tokio::process::Command;
 
 use crate::error::Error;
 use crate::tools::Tool;
 
+use super::process::hidden_command;
 use super::sandbox::{SensitivePathPolicy, resolve_existing_path};
 
 // —— 参数字段名 ——
@@ -172,7 +172,7 @@ impl Tool for SemgrepScanner {
             .unwrap_or(DEFAULT_RULESET);
 
         // 调用 semgrep CLI
-        let output = Command::new(CMD_SEMGREP)
+        let output = hidden_command(CMD_SEMGREP)
             .args([
                 "scan",
                 "--config",

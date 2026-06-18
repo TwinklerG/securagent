@@ -31,17 +31,11 @@ import type {
 } from "./types";
 
 const LIVE_ERROR_FALLBACK = "本轮运行失败，详情见运行轨迹和错误提示。";
-const LIVE_PENDING_FALLBACK = "Agent 正在分析当前审计请求。";
-const LIVE_STATE_PREFIX = "Agent 状态";
-const LIVE_SUBAGENT_PREFIX = "子 Agent";
-const LIVE_TOOL_CALL_PREFIX = "正在调用工具";
-const LIVE_TOOL_CONFIRM_PREFIX = "工具请求确认";
-const LIVE_TOOL_RESULT_PREFIX = "已收到工具结果";
 
 const workbench = ref<AgentWorkbench | null>(null);
 const requestPending = ref(false);
 const liveAssistantContent = ref("");
-const liveAssistantSynthetic = ref(false);
+const liveAssistantMessages = ref<Array<GuiMessage>>([]);
 const switchingWorkDir = ref(false);
 const errorText = ref<string | null>(null);
 const opsRailWidth = ref(OPS_RAIL_DEFAULT_WIDTH);
@@ -53,19 +47,18 @@ const backendMessages = computed<Array<GuiMessage>>(
   () => workbench.value?.conversation.messages ?? [],
 );
 const messages = computed<Array<GuiMessage>>(() => {
-  if (!liveAssistantContent.value || !requestPending.value) {
+  if (!requestPending.value) {
     return backendMessages.value;
   }
-  return [
-    ...backendMessages.value,
-    {
-      role: "assistant",
-      content: liveAssistantContent.value,
-    },
-  ];
+  const liveMessages = [...backendMessages.value, ...liveAssistantMessages.value];
+  if (!liveAssistantContent.value) {
+    return liveMessages;
+  }
+  return [...liveMessages, createAssistantMessage(liveAssistantContent.value, true, false)];
 });
 const trace = computed<Array<TraceEvent>>(() => workbench.value?.trace ?? []);
 const sessions = computed(() => workbench.value?.conversation.sessions ?? []);
+const skills = computed(() => workbench.value?.skills ?? []);
 const tools = computed(() => workbench.value?.tools ?? []);
 const findings = computed(() => workbench.value?.findings ?? []);
 const project = computed(() => workbench.value?.project ?? null);
@@ -89,6 +82,8 @@ onMounted(async () => {
 
 async function refreshWorkbench() {
   try {
+    resetLiveAssistant();
+    resetLiveAssistantMessages();
     workbench.value = await initWorkbench();
     errorText.value = null;
   } catch (error) {
@@ -104,8 +99,13 @@ async function handleSubmit(message: string) {
   requestPending.value = true;
   errorText.value = null;
   resetLiveAssistant();
-  showLiveStatus(run.value?.pendingDetail || LIVE_PENDING_FALLBACK);
-  appendLocalMessage({ role: "user", content: message });
+  resetLiveAssistantMessages();
+  appendLocalMessage({
+    role: "user",
+    content: message,
+    streaming: false,
+    continuesWithTool: false,
+  });
 
   try {
     const nextWorkbench = await sendAuditMessage(message);
@@ -113,6 +113,7 @@ async function handleSubmit(message: string) {
     workbench.value = nextWorkbench;
   } catch (error) {
     resetLiveAssistant();
+    addLiveAssistantMessage(error instanceof Error ? error.message : String(error), false);
     setError(error);
   } finally {
     requestPending.value = false;
@@ -126,6 +127,8 @@ async function handleNewSession() {
 
   try {
     errorText.value = null;
+    resetLiveAssistant();
+    resetLiveAssistantMessages();
     workbench.value = await createSession();
   } catch (error) {
     setError(error);
@@ -139,6 +142,8 @@ async function handleSwitchSession(id: string) {
 
   try {
     errorText.value = null;
+    resetLiveAssistant();
+    resetLiveAssistantMessages();
     workbench.value = await switchSession(id);
   } catch (error) {
     setError(error);
@@ -165,6 +170,8 @@ async function handleApplyWorkDir(nextDir: string) {
 
   switchingWorkDir.value = true;
   errorText.value = null;
+  resetLiveAssistant();
+  resetLiveAssistantMessages();
   try {
     workbench.value = await setWorkDir(nextDir);
   } catch (error) {
@@ -181,6 +188,8 @@ async function handleBrowseWorkDir(currentWorkDir: string) {
 
   try {
     errorText.value = null;
+    resetLiveAssistant();
+    resetLiveAssistantMessages();
     const selected = await selectWorkDir(currentWorkDir);
     if (selected && selected !== project.value?.workDir) {
       await handleApplyWorkDir(selected);
@@ -283,22 +292,10 @@ function applyLiveAssistantEvent(event: TraceEvent) {
       appendLiveToken(event.detail);
       break;
     case "think":
-      replaceLiveAssistant(event.detail);
+      applyLiveAssistantText(event.detail);
       break;
     case "tool_call":
-      showLiveStatus(`${LIVE_TOOL_CALL_PREFIX}：${event.title}`);
-      break;
-    case "tool_confirm":
-      showLiveStatus(`${LIVE_TOOL_CONFIRM_PREFIX}：${event.title}`);
-      break;
-    case "tool_result":
-      showLiveStatus(`${LIVE_TOOL_RESULT_PREFIX}：${event.title}`);
-      break;
-    case "subagent":
-      showLiveStatus(`${LIVE_SUBAGENT_PREFIX}：${event.title}`);
-      break;
-    case "state":
-      showLiveStatus(`${LIVE_STATE_PREFIX}：${event.title}`);
+      commitLiveContentAsToolBlock();
       break;
     case "error":
       replaceLiveAssistant(event.detail || LIVE_ERROR_FALLBACK);
@@ -310,10 +307,7 @@ function appendLiveToken(delta: string) {
   if (!delta) {
     return;
   }
-  liveAssistantContent.value = liveAssistantSynthetic.value
-    ? delta
-    : `${liveAssistantContent.value}${delta}`;
-  liveAssistantSynthetic.value = false;
+  liveAssistantContent.value = `${liveAssistantContent.value}${delta}`;
 }
 
 function replaceLiveAssistant(content: string) {
@@ -321,20 +315,55 @@ function replaceLiveAssistant(content: string) {
     return;
   }
   liveAssistantContent.value = content;
-  liveAssistantSynthetic.value = false;
 }
 
-function showLiveStatus(content: string) {
-  if (!content || (liveAssistantContent.value && !liveAssistantSynthetic.value)) {
+function applyLiveAssistantText(content: string) {
+  const normalized = content.trim();
+  if (liveAssistantContent.value.trim()) {
     return;
   }
-  liveAssistantContent.value = content;
-  liveAssistantSynthetic.value = true;
+  addLiveAssistantMessage(normalized, false);
+}
+
+function commitLiveContentAsToolBlock() {
+  addLiveAssistantMessage(liveAssistantContent.value, true);
+  liveAssistantContent.value = "";
+}
+
+function addLiveAssistantMessage(content: string, continuesWithTool: boolean) {
+  const normalized = content.trim();
+  if (!normalized) {
+    return;
+  }
+  const last = liveAssistantMessages.value.at(-1);
+  if (last?.content === normalized) {
+    return;
+  }
+  liveAssistantMessages.value = [
+    ...liveAssistantMessages.value,
+    createAssistantMessage(normalized, false, continuesWithTool),
+  ];
+}
+
+function resetLiveAssistantMessages() {
+  liveAssistantMessages.value = [];
 }
 
 function resetLiveAssistant() {
   liveAssistantContent.value = "";
-  liveAssistantSynthetic.value = false;
+}
+
+function createAssistantMessage(
+  content: string,
+  streaming: boolean,
+  continuesWithTool: boolean,
+): GuiMessage {
+  return {
+    role: "assistant",
+    content,
+    streaming,
+    continuesWithTool,
+  };
 }
 
 function setError(error: unknown) {
@@ -378,6 +407,7 @@ function isPersistentTraceEvent(event: TraceEvent): boolean {
     <OpsRail
       :trace="trace"
       :status="status"
+      :skills="skills"
       :tools="tools"
       :findings="findings"
       :width="opsRailWidth"

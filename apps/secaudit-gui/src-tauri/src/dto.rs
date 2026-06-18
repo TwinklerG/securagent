@@ -11,6 +11,7 @@ pub(crate) struct AgentWorkbench {
     pub(crate) conversation: ConversationPanel,
     pub(crate) run: RunPanel,
     pub(crate) status: StatusPanel,
+    pub(crate) skills: Vec<SkillCapability>,
     pub(crate) tools: Vec<ToolCapability>,
     pub(crate) trace: Vec<TraceEvent>,
     pub(crate) findings: Vec<FindingPreview>,
@@ -72,6 +73,7 @@ pub(crate) struct StatusPanel {
     pub(crate) token_usage: GuiTokenUsage,
     pub(crate) message_count: usize,
     pub(crate) trace_count: usize,
+    pub(crate) skill_count: usize,
     pub(crate) tool_count: usize,
     pub(crate) finding_count: usize,
 }
@@ -163,6 +165,15 @@ pub(crate) struct ToolCapability {
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+pub(crate) struct SkillCapability {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) command: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub(crate) struct ToolParameter {
     pub(crate) key: ToolParameterKey,
     pub(crate) name: String,
@@ -176,6 +187,7 @@ pub(crate) struct ToolParameter {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub(crate) enum ToolParameterKey {
+    Arguments,
     Command,
     Content,
     ContextLines,
@@ -191,6 +203,7 @@ pub(crate) enum ToolParameterKey {
     Query,
     Recursive,
     Ruleset,
+    SkillName,
     TimeoutSecs,
     Other,
 }
@@ -198,6 +211,7 @@ pub(crate) enum ToolParameterKey {
 impl ToolParameterKey {
     pub(crate) const fn for_name(name: &str) -> Self {
         match name.as_bytes() {
+            b"arguments" => Self::Arguments,
             b"command" => Self::Command,
             b"content" => Self::Content,
             b"context_lines" => Self::ContextLines,
@@ -213,6 +227,7 @@ impl ToolParameterKey {
             b"query" => Self::Query,
             b"recursive" => Self::Recursive,
             b"ruleset" => Self::Ruleset,
+            b"skill_name" => Self::SkillName,
             b"timeout_secs" => Self::TimeoutSecs,
             _ => Self::Other,
         }
@@ -235,8 +250,9 @@ impl ToolParameterKey {
             Self::Query => "查询",
             Self::Recursive => "递归",
             Self::Ruleset => "规则集",
+            Self::SkillName => "Skill",
             Self::TimeoutSecs => "超时秒数",
-            Self::Other => "参数",
+            Self::Arguments | Self::Other => "参数",
         }
     }
 }
@@ -340,6 +356,8 @@ pub(crate) struct GuiSessionListItem {
 pub(crate) struct GuiMessage {
     pub(crate) role: GuiRole,
     pub(crate) content: String,
+    pub(crate) streaming: bool,
+    pub(crate) continues_with_tool: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -406,41 +424,38 @@ pub(crate) struct CommandApprovalResolution {
 impl GuiMessage {
     pub(crate) fn from_agent_history(messages: &[ChatMessage]) -> Vec<Self> {
         let mut display_messages = Vec::new();
-        let mut pending_assistant: Option<String> = None;
 
         for message in messages {
             match message.role {
                 Role::User => {
-                    push_pending_assistant(&mut display_messages, &mut pending_assistant);
                     if let Some(content) = non_empty_content(message) {
                         display_messages.push(Self {
                             role: GuiRole::User,
                             content,
+                            streaming: false,
+                            continues_with_tool: false,
                         });
                     }
                 }
-                Role::Assistant if message.tool_calls.as_ref().is_none_or(Vec::is_empty) => {
+                Role::Assistant => {
                     if let Some(content) = non_empty_content(message) {
-                        pending_assistant = Some(content);
+                        display_messages.push(Self {
+                            role: GuiRole::Assistant,
+                            content,
+                            streaming: false,
+                            continues_with_tool: message
+                                .tool_calls
+                                .as_ref()
+                                .is_some_and(|calls| !calls.is_empty()),
+                        });
                     }
                 }
-                Role::System | Role::Tool | Role::Assistant => {}
+                Role::System | Role::Tool => {}
             }
         }
 
-        push_pending_assistant(&mut display_messages, &mut pending_assistant);
         display_messages
     }
-}
-
-fn push_pending_assistant(messages: &mut Vec<GuiMessage>, pending: &mut Option<String>) {
-    let Some(content) = pending.take() else {
-        return;
-    };
-    messages.push(GuiMessage {
-        role: GuiRole::Assistant,
-        content,
-    });
 }
 
 fn non_empty_content(message: &ChatMessage) -> Option<String> {
@@ -454,16 +469,16 @@ fn non_empty_content(message: &ChatMessage) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use secaudit_agent::{ChatMessage, Role};
+    use secaudit_agent::{ChatMessage, FunctionCall, Role, ToolCallResponse};
 
     use super::{GuiMessage, GuiRole};
 
     #[test]
-    fn agent_history_keeps_one_assistant_reply_per_user_turn() {
+    fn agent_history_keeps_tool_call_assistant_text_as_compact_blocks() {
         let messages = vec![
             ChatMessage::system("sys"),
             ChatMessage::user("审计项目"),
-            assistant_with_tool("我先查看项目结构"),
+            assistant_with_tool("我先查看项目结构\n\n## 阶段一：侦查"),
             ChatMessage::tool_result("call-1", "tool output"),
             assistant_text("## 最终报告"),
             ChatMessage::user("继续"),
@@ -473,18 +488,64 @@ mod tests {
 
         let display = GuiMessage::from_agent_history(&messages);
 
-        assert_eq!(display.len(), 4);
+        assert_eq!(display.len(), 6);
         assert_eq!(
             display.first().map(|message| message.role),
             Some(GuiRole::User)
         );
         assert_eq!(
             display.get(1).map(|message| message.content.as_str()),
+            Some("我先查看项目结构\n\n## 阶段一：侦查")
+        );
+        assert_eq!(
+            display.get(1).map(|message| message.continues_with_tool),
+            Some(true)
+        );
+        assert_eq!(
+            display.get(2).map(|message| message.content.as_str()),
             Some("## 最终报告")
         );
         assert_eq!(
-            display.get(3).map(|message| message.content.as_str()),
+            display.get(2).map(|message| message.continues_with_tool),
+            Some(false)
+        );
+        assert_eq!(
+            display.get(4).map(|message| message.content.as_str()),
+            Some("我再检查依赖")
+        );
+        assert_eq!(
+            display.get(4).map(|message| message.continues_with_tool),
+            Some(true)
+        );
+        assert_eq!(
+            display.get(5).map(|message| message.content.as_str()),
             Some("第二轮结论")
+        );
+    }
+
+    #[test]
+    fn agent_history_keeps_unfinished_tool_call_assistant_text_before_next_user() {
+        let messages = vec![
+            ChatMessage::user("审计项目"),
+            assistant_with_tool("## 阶段一：侦查"),
+            ChatMessage::tool_result("call-1", "tool output"),
+            ChatMessage::user("暂停"),
+        ];
+
+        let display = GuiMessage::from_agent_history(&messages);
+
+        assert_eq!(display.len(), 3);
+        assert_eq!(
+            display.get(1).map(|message| message.role),
+            Some(GuiRole::Assistant)
+        );
+        assert_eq!(
+            display.get(1).map(|message| message.content.as_str()),
+            Some("## 阶段一：侦查")
+        );
+        assert_eq!(
+            display.get(1).map(|message| message.continues_with_tool),
+            Some(true)
         );
     }
 
@@ -502,7 +563,14 @@ mod tests {
         ChatMessage {
             role: Role::Assistant,
             content: Some(content.to_owned()),
-            tool_calls: Some(Vec::new()),
+            tool_calls: Some(vec![ToolCallResponse {
+                id: "call-1".to_owned(),
+                r#type: "function".to_owned(),
+                function: FunctionCall {
+                    name: "read_file".to_owned(),
+                    arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+                },
+            }]),
             tool_call_id: None,
             usage: None,
         }

@@ -3,6 +3,7 @@ import type {
   AgentWorkbench,
   GuiContextUsage,
   GuiMessage,
+  SkillCapability,
   ToolCapability,
   ToolParameter,
   TraceEvent,
@@ -132,6 +133,16 @@ const PREVIEW_TOOLS: Array<ToolCapability> = [
     ],
   },
   {
+    name: "use_skill",
+    category: "Skill",
+    risk: "只读",
+    description: "激活预设 Skill，将完整指令注入本轮上下文。",
+    parameters: [
+      createPreviewToolParameter("skill_name", "Skill", "要激活的 Skill 名称", "string", true),
+      createPreviewToolParameter("arguments", "参数", "传给 Skill 的可选参数", "string", false),
+    ],
+  },
+  {
     name: "execute_command",
     category: "命令",
     risk: "需确认",
@@ -148,12 +159,24 @@ const PREVIEW_TOOLS: Array<ToolCapability> = [
     ],
   },
 ];
+const PREVIEW_SKILLS: Array<SkillCapability> = [
+  {
+    name: "secure-code-review",
+    description: "按安全审计流程检查入口、权限边界、危险调用和修复建议。",
+    command: "/secure-code-review",
+  },
+  {
+    name: "threat-model",
+    description: "围绕资产、攻击面和信任边界整理威胁模型。",
+    command: "/threat-model",
+  },
+];
+
 export function createPreviewWorkbench(request?: string): AgentWorkbench {
   const traceNow = createTimeLabel();
   const sessionNow = new Date().toISOString();
   const userMessage = createUserMessage(request ?? PREVIEW_DEFAULT_REQUEST);
-  const assistantMessage = createAssistantMessage();
-  const messages = [userMessage, assistantMessage];
+  const messages = [userMessage, ...createAssistantMessages(Boolean(request))];
   const trace = createPreviewTrace(traceNow);
   const findings = createPreviewFindings();
 
@@ -194,9 +217,11 @@ export function createPreviewWorkbench(request?: string): AgentWorkbench {
       },
       messageCount: messages.length,
       traceCount: trace.length,
+      skillCount: PREVIEW_SKILLS.length,
       toolCount: PREVIEW_TOOLS.length,
       findingCount: findings.length,
     },
+    skills: PREVIEW_SKILLS,
     tools: PREVIEW_TOOLS,
     trace,
     findings,
@@ -240,12 +265,28 @@ export function createPreviewArchiveSession(sessionId: string): AgentWorkbench {
 }
 
 export function createPreviewAgentEvents(request: string): Array<AgentEvent> {
+  const finalLiveResponse =
+    "## 实时审计计划\n\n我会先识别入口、权限边界和外部输入，再调用只读工具收集证据。";
+
   return [
     createPreviewAgentEvent("state", "预览运行", `接收审计请求：${request}`),
+    createPreviewAgentEvent(
+      "token",
+      "流式输出",
+      "好的，我来开始审计这个项目。首先，让我了解项目的整体结构和技术栈。\n\n## 阶段一：侦查",
+    ),
     createPreviewAgentEvent("tool_call", "read_file", JSON.stringify(PREVIEW_READ_FILE_ARGS)),
+    createPreviewAgentEvent(
+      "token",
+      "流式输出",
+      "这是一个 Rust 安全审计工具项目！现在让我深入查看各个 crate 的源代码。",
+    ),
     createPreviewAgentEvent("tool_call", "semgrep_scanner", JSON.stringify(PREVIEW_SEMGREP_ARGS)),
-    createPreviewAgentEvent("token", "流式输出", "我会先识别入口、"),
+    createPreviewAgentEvent("state", "过程输出已归档", "工具调用前文本已归入过程输出。"),
+    createPreviewAgentEvent("token", "流式输出", "## 实时审计计划\n\n我会先识别入口、"),
     createPreviewAgentEvent("token", "流式输出", "权限边界和外部输入，"),
+    createPreviewAgentEvent("token", "流式输出", "再调用只读工具收集证据。"),
+    createPreviewAgentEvent("think", "思考", finalLiveResponse),
     createPreviewAgentEvent("tool_result", "read_file", "已返回预览模式下的模拟文件摘要。"),
     createPreviewAgentEvent("token", "Token 用量", "", {
       tokenUsage: {
@@ -270,7 +311,6 @@ export function createPreviewAgentEvents(request: string): Array<AgentEvent> {
         },
       },
     ),
-    createPreviewAgentEvent("token", "流式输出", "再调用只读工具收集证据。"),
   ];
 }
 
@@ -292,11 +332,43 @@ function createPreviewToolParameter(
 }
 
 function createUserMessage(content: string): GuiMessage {
-  return { role: "user", content };
+  return { role: "user", content, streaming: false, continuesWithTool: false };
 }
 
-function createAssistantMessage(): GuiMessage {
-  return { role: "assistant", content: PREVIEW_RESPONSE };
+function createAssistantMessages(withToolPrelude: boolean): Array<GuiMessage> {
+  return [
+    ...(withToolPrelude ? createPreviewToolPreludeMessages() : []),
+    {
+      role: "assistant",
+      content: PREVIEW_RESPONSE,
+      streaming: false,
+      continuesWithTool: false,
+    },
+  ];
+}
+
+function createPreviewToolPreludeMessages(): Array<GuiMessage> {
+  return [
+    {
+      role: "assistant",
+      content:
+        "好的，我来开始审计这个项目。首先，让我了解项目的整体结构和技术栈。\n\n## 阶段一：侦查",
+      streaming: false,
+      continuesWithTool: true,
+    },
+    {
+      role: "assistant",
+      content: "这是一个 Rust 安全审计工具项目！现在让我深入查看各个 crate 的源代码。",
+      streaming: false,
+      continuesWithTool: true,
+    },
+    {
+      role: "assistant",
+      content: "现在让我读取关键的安全相关文件，重点关注工具实现、配置和 LLM 交互部分。",
+      streaming: false,
+      continuesWithTool: true,
+    },
+  ];
 }
 
 function createPreviewContextUsage(): GuiContextUsage {

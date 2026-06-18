@@ -68,6 +68,12 @@ const TOOL_CATALOG: &[ToolMetadata] = &[
         risk: "需确认",
         description: "写入修复补丁，默认需要用户确认。",
     },
+    ToolMetadata {
+        name: "use_skill",
+        category: "Skill",
+        risk: "只读",
+        description: "激活预设 Skill，将完整指令注入本轮上下文。",
+    },
 ];
 
 const FALLBACK_TOOL: ToolMetadata = ToolMetadata {
@@ -161,9 +167,12 @@ fn property_type_name(property: &Value) -> String {
 mod tests {
     use std::path::Path;
 
+    use secaudit_agent::ToolDefinition;
+    use serde_json::json;
+
     use crate::dto::ToolParameterKey;
 
-    use super::tool_capabilities;
+    use super::{tool_capabilities, tool_capability};
 
     #[test]
     fn tool_schema_parameters_are_known_to_gui_projection() {
@@ -202,6 +211,53 @@ mod tests {
         assert_eq!(project_path.key, ToolParameterKey::ProjectPath);
         assert_eq!(project_path.label, "项目路径");
         assert!(project_path.required, "project_path should be required");
+        Ok(())
+    }
+
+    #[test]
+    fn use_skill_tool_gets_readable_gui_metadata() -> Result<(), String> {
+        let capability = tool_capability(ToolDefinition {
+            name: "use_skill".to_owned(),
+            description: "Activate a predefined skill".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill to activate"
+                    },
+                    "arguments": {
+                        "type": "string",
+                        "description": "Optional arguments to pass to the skill"
+                    }
+                },
+                "required": ["skill_name"]
+            }),
+        });
+
+        assert_eq!(capability.category, "Skill");
+        assert_eq!(capability.risk, "只读");
+        let Some(skill_name) = capability
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "skill_name")
+        else {
+            return Err("skill_name should be present".to_owned());
+        };
+        let Some(arguments) = capability
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "arguments")
+        else {
+            return Err("arguments should be present".to_owned());
+        };
+
+        assert_eq!(skill_name.key, ToolParameterKey::SkillName);
+        assert_eq!(skill_name.label, "Skill");
+        assert!(skill_name.required, "skill_name should be required");
+        assert_eq!(arguments.key, ToolParameterKey::Arguments);
+        assert_eq!(arguments.label, "参数");
+        assert!(!arguments.required, "arguments should be optional");
         Ok(())
     }
 }

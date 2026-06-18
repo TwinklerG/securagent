@@ -127,7 +127,10 @@ function handleInputKeydown(event: KeyboardEvent) {
 }
 
 function roleLabel(message: GuiMessage) {
-  return message.role === "user" ? "你" : "Agent";
+  if (message.role === "user") {
+    return "你";
+  }
+  return "Agent";
 }
 
 function assistantMarkdown(content: string): string {
@@ -161,6 +164,17 @@ function messageBodyClass(message: GuiMessage): string {
   return message.role === "user"
     ? `${base} col-start-1 row-start-1 bg-[#213f36] text-[#fffaf0]`
     : `${base} bg-[rgba(255,252,244,0.88)]`;
+}
+
+function assistantContentClass(): string {
+  return "markdown-body";
+}
+
+function assistantContentTestId(message: GuiMessage): string {
+  if (message.streaming) {
+    return "assistant-stream";
+  }
+  return message.continuesWithTool ? "assistant-tool-output" : "assistant-markdown";
 }
 
 function statusPillClass(): string {
@@ -268,8 +282,9 @@ async function scrollChatToBottom() {
 
       <article
         v-for="(message, index) in messages"
-        :key="`${message.role}-${index}-${message.content.length}`"
+        :key="`${message.role}-${index}`"
         :class="messageRowClass(message)"
+        :data-testid="message.role === 'assistant' ? 'message-assistant' : 'message-user'"
       >
         <div :class="avatarClass(message)">
           <Bot v-if="message.role === 'assistant'" :size="18" />
@@ -278,12 +293,12 @@ async function scrollChatToBottom() {
         <div :class="messageBodyClass(message)">
           <div class="mb-2 text-xs font-black text-inherit opacity-75">{{ roleLabel(message) }}</div>
           <div
-            v-if="message.role === 'assistant'"
-            class="markdown-body"
-            data-testid="assistant-markdown"
+            v-if="message.role === 'assistant' && message.content"
+            :class="assistantContentClass()"
+            :data-testid="assistantContentTestId(message)"
             v-html="assistantMarkdown(message.content)"
           />
-          <p v-else class="m-0 whitespace-pre-wrap leading-[1.65] [overflow-wrap:anywhere]">
+          <p v-else-if="message.role === 'user'" class="m-0 whitespace-pre-wrap leading-[1.65] [overflow-wrap:anywhere]">
             {{ message.content }}
           </p>
         </div>

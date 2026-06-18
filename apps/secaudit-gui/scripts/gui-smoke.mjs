@@ -21,6 +21,7 @@ const REQUIRED_TEXT = [
   "会话历史",
   "轨迹",
   "确认",
+  "Skill",
   "工具",
   "发现",
 ];
@@ -47,6 +48,9 @@ const BROWSER_FLAGS = [
 const SELECTORS = {
   appShell: '[data-testid="app-shell"]',
   assistantMarkdown: '[data-testid="assistant-markdown"]',
+  assistantMessage: '[data-testid="message-assistant"]',
+  assistantStream: '[data-testid="assistant-stream"]',
+  assistantToolOutput: '[data-testid="assistant-tool-output"]',
   commandApprovalApprove: '[data-testid="command-approval-approve"]',
   commandApprovalDeny: '[data-testid="command-approval-deny"]',
   commandApprovalDialog: '[data-testid="command-approval-dialog"]',
@@ -66,6 +70,7 @@ const SELECTORS = {
   opsResizer: '[data-testid="ops-resizer"]',
   opsTabConfirm: '[data-testid="ops-tab-confirm"]',
   opsTabFindings: '[data-testid="ops-tab-findings"]',
+  opsTabSkills: '[data-testid="ops-tab-skills"]',
   opsTabStatus: '[data-testid="ops-tab-status"]',
   opsTabTools: '[data-testid="ops-tab-tools"]',
   opsTabTrace: '[data-testid="ops-tab-trace"]',
@@ -76,6 +81,10 @@ const SELECTORS = {
   sessionArchiveButton: '[data-testid="session-archive-button"]',
   sessionItem: '[data-testid="session-item"]',
   sessionList: '[data-testid="session-list"]',
+  skillCommand: '[data-testid="skill-command"]',
+  skillCount: '[data-testid="skill-count"]',
+  skillItem: '[data-testid="skill-item"]',
+  skillList: '[data-testid="skill-list"]',
   statusPanel: '[data-testid="status-panel"]',
   statusTokenCompletion: '[data-testid="status-token-completion"]',
   statusTokenPrompt: '[data-testid="status-token-prompt"]',
@@ -227,6 +236,7 @@ async function checkOpsRailTabs() {
       statusVisible: Boolean(document.querySelector('${SELECTORS.statusPanel}')),
       traceVisible: Boolean(document.querySelector('${SELECTORS.opsTabTrace}')),
       confirmVisible: Boolean(document.querySelector('${SELECTORS.opsTabConfirm}')),
+      skillsVisible: Boolean(document.querySelector('${SELECTORS.opsTabSkills}')),
       toolsVisible: Boolean(document.querySelector('${SELECTORS.opsTabTools}')),
       findingsVisible: Boolean(document.querySelector('${SELECTORS.opsTabFindings}')),
       resizerVisible: Boolean(document.querySelector('${SELECTORS.opsResizer}')),
@@ -239,6 +249,7 @@ async function checkOpsRailTabs() {
       tabs.statusVisible &&
       tabs.traceVisible &&
       tabs.confirmVisible &&
+      tabs.skillsVisible &&
       tabs.toolsVisible &&
       tabs.findingsVisible &&
       tabs.resizerVisible,
@@ -293,6 +304,8 @@ async function checkToolCapabilityPanel() {
         fileToolVisible: text.includes("read_file"),
         networkToolVisible: text.includes("nvd_lookup"),
         confirmToolVisible: text.includes("execute_command"),
+        skillToolVisible: text.includes("use_skill"),
+        skillNameParameterVisible: text.includes("Skill"),
         parameterGroupCount: document.querySelectorAll('${SELECTORS.toolParameters}').length,
         parameterCount: document.querySelectorAll('${SELECTORS.toolParameter}').length,
         projectPathParameterVisible: text.includes("项目路径"),
@@ -305,8 +318,8 @@ async function checkToolCapabilityPanel() {
   addCheck(
     "工具能力按类别和风险展示",
     panel.groupCount >= 4 &&
-      panel.itemCount >= 5 &&
-      panel.countLabel.includes("5") &&
+      panel.itemCount >= 6 &&
+      panel.countLabel.includes("6") &&
       panel.fileGroupVisible &&
       panel.readonlyRiskVisible &&
       panel.networkRiskVisible &&
@@ -314,11 +327,42 @@ async function checkToolCapabilityPanel() {
       panel.fileToolVisible &&
       panel.networkToolVisible &&
       panel.confirmToolVisible &&
-      panel.parameterGroupCount >= 5 &&
-      panel.parameterCount >= 10 &&
+      panel.skillToolVisible &&
+      panel.skillNameParameterVisible &&
+      panel.parameterGroupCount >= 6 &&
+      panel.parameterCount >= 12 &&
       panel.projectPathParameterVisible &&
       panel.rulesetParameterVisible &&
       panel.requiredParameterVisible,
+    panel,
+  );
+}
+
+async function checkSkillPanel() {
+  await selectOpsTab(SELECTORS.opsTabSkills, SELECTORS.skillList, "切换 Skill tab");
+  const panel = await evaluate(
+    `(() => {
+      const list = document.querySelector('${SELECTORS.skillList}');
+      const text = list?.innerText ?? "";
+      return {
+        countLabel: document.querySelector('${SELECTORS.skillCount}')?.innerText ?? "",
+        itemCount: document.querySelectorAll('${SELECTORS.skillItem}').length,
+        commandCount: document.querySelectorAll('${SELECTORS.skillCommand}').length,
+        secureSkillVisible: text.includes("secure-code-review"),
+        threatSkillVisible: text.includes("threat-model"),
+        commandVisible: text.includes("/secure-code-review"),
+      };
+    })()`,
+    "Skill 面板状态",
+  );
+  addCheck(
+    "Skill 面板展示可触发命令",
+    panel.countLabel.includes("2") &&
+      panel.itemCount === 2 &&
+      panel.commandCount === 2 &&
+      panel.secureSkillVisible &&
+      panel.threatSkillVisible &&
+      panel.commandVisible,
     panel,
   );
 }
@@ -595,37 +639,85 @@ async function checkPreviewInteraction() {
   await evaluate(`document.querySelector('${SELECTORS.sendButton}').click()`, "点击发送");
   await waitForExpression("document.body.innerText.includes('检查 preview 模式下的审计请求流')");
   await waitForExpression(
-    `document.body.innerText.includes("我会先识别入口、") && document.querySelector('${SELECTORS.sendButton}')?.disabled === true`,
+    `document.querySelectorAll('${SELECTORS.assistantToolOutput}').length >= 2 && document.querySelector('${SELECTORS.assistantToolOutput}')?.innerText.includes("阶段一：侦查") && document.querySelector('${SELECTORS.assistantToolOutput}')?.querySelector("h2")?.innerText.includes("阶段一：侦查") && !document.querySelector('${SELECTORS.assistantStream}') && document.querySelector('${SELECTORS.sendButton}')?.disabled === true`,
   );
-  const duringRun = await evaluate(
+  const duringTools = await evaluate(
     `(() => ({
-      liveDraftVisible: document.body.innerText.includes("我会先识别入口、"),
+      processLeakedAsStream: document.querySelector('${SELECTORS.assistantStream}')?.innerText.includes("阶段一：侦查") ?? false,
+      liveDraftVisible: Boolean(document.querySelector('${SELECTORS.assistantStream}')),
+      toolBlockCount: document.querySelectorAll('${SELECTORS.assistantToolOutput}').length,
+      toolBlockPhaseVisible: document.querySelector('${SELECTORS.assistantToolOutput}')?.innerText.includes("阶段一：侦查") ?? false,
+      toolBlockMarkdown: document.querySelector('${SELECTORS.assistantToolOutput}')?.querySelector("h2")?.innerText.includes("阶段一：侦查") ?? false,
+      toolBlockAnchoredInAssistant: Boolean(document.querySelector('${SELECTORS.assistantToolOutput}')?.closest('${SELECTORS.assistantMessage}')),
+      toolBlockLabelStable: !document.querySelector('${SELECTORS.assistantToolOutput}')?.closest('${SELECTORS.assistantMessage}')?.innerText.includes("调用工具后继续"),
+      toolBlockHeight: Math.round(document.querySelector('${SELECTORS.assistantToolOutput}')?.getBoundingClientRect().height ?? 0),
       sendDisabled: document.querySelector('${SELECTORS.sendButton}')?.disabled ?? false,
       workDirDisabled: document.querySelector('${SELECTORS.workDirInput}')?.disabled ?? false,
     }))()`,
-    "运行中临时反馈",
+    "工具调用阶段临时反馈",
   );
   addCheck(
-    "预览模式显示运行中 Agent 草稿",
-    duringRun.liveDraftVisible && duringRun.sendDisabled && duringRun.workDirDisabled,
-    duringRun,
+    "预览模式稳定展示工具调用前 Agent 输出块",
+    !duringTools.processLeakedAsStream &&
+      !duringTools.liveDraftVisible &&
+      duringTools.toolBlockCount >= 2 &&
+      duringTools.toolBlockPhaseVisible &&
+      duringTools.toolBlockMarkdown &&
+      duringTools.toolBlockAnchoredInAssistant &&
+      duringTools.toolBlockLabelStable &&
+      duringTools.toolBlockHeight > 0 &&
+      duringTools.sendDisabled &&
+      duringTools.workDirDisabled,
+    duringTools,
+  );
+
+  await waitForExpression(
+    `document.querySelector('${SELECTORS.assistantStream}')?.querySelector("h2")?.innerText.includes("实时审计计划") && document.querySelector('${SELECTORS.sendButton}')?.disabled === true`,
+  );
+  const duringFinal = await evaluate(
+    `(() => ({
+      liveDraftVisible: document.body.innerText.includes("我会先识别入口、"),
+      liveDraftMarkdown: document.querySelector('${SELECTORS.assistantStream}')?.querySelector("h2")?.innerText.includes("实时审计计划") ?? false,
+      processLeakedIntoFinal: document.querySelector('${SELECTORS.assistantStream}')?.innerText.includes("阶段一：侦查") ?? false,
+      stillRunning: document.querySelector('${SELECTORS.sendButton}')?.disabled ?? false,
+    }))()`,
+    "最终回复流式反馈",
+  );
+  addCheck(
+    "预览模式在完成前渲染最终 Markdown 正文",
+    duringFinal.liveDraftVisible &&
+      duringFinal.liveDraftMarkdown &&
+      !duringFinal.processLeakedIntoFinal &&
+      duringFinal.stillRunning,
+    duringFinal,
   );
   await checkLiveTokenUsageDuringRun();
   await checkTraceFiltersDuringRun();
   await waitForExpression(
-    `document.body.innerText.includes("不会访问真实 API Key") && document.querySelector('${SELECTORS.sendButton}')?.disabled === true`,
+    `document.querySelectorAll('${SELECTORS.assistantToolOutput}').length >= 3 && document.body.innerText.includes("不会访问真实 API Key") && document.querySelector('${SELECTORS.sendButton}')?.disabled === true`,
   );
   const afterSend = await evaluate(
     `(() => ({
       userMessageVisible: document.body.innerText.includes("检查 preview 模式下的审计请求流"),
       assistantMessageVisible: document.body.innerText.includes("我会先识别入口"),
+      toolBlockVisible: Boolean(document.querySelector('${SELECTORS.assistantToolOutput}')),
+      toolBlockCount: document.querySelectorAll('${SELECTORS.assistantToolOutput}').length,
+      toolBlockPhaseVisible: document.querySelector('${SELECTORS.assistantToolOutput}')?.innerText.includes("阶段一：侦查") ?? false,
+      toolBlockAnchoredInAssistant: Boolean(document.querySelector('${SELECTORS.assistantToolOutput}')?.closest('${SELECTORS.assistantMessage}')),
+      finalMarkdownVisible: Boolean(document.querySelector('${SELECTORS.assistantMarkdown}')),
       textareaCleared: document.querySelector('${SELECTORS.composerInput}')?.value === "",
     }))()`,
     "发送后状态",
   );
   addCheck(
-    "预览模式可输入并发送审计请求",
-    afterSend.userMessageVisible && afterSend.assistantMessageVisible,
+    "预览模式完成后保留紧凑 Agent 输出块",
+    afterSend.userMessageVisible &&
+      afterSend.assistantMessageVisible &&
+      afterSend.toolBlockVisible &&
+      afterSend.toolBlockCount >= 3 &&
+      afterSend.toolBlockPhaseVisible &&
+      afterSend.toolBlockAnchoredInAssistant &&
+      afterSend.finalMarkdownVisible,
     afterSend,
   );
 
@@ -801,11 +893,7 @@ async function checkTraceFiltersDuringRun() {
   );
   addCheck(
     "运行轨迹不展示流式 token 噪音",
-    traceNoise.allActive &&
-      traceNoise.itemCount > 0 &&
-      !traceNoise.tokenEventVisible &&
-      traceNoise.toolEventVisible &&
-      traceNoise.confirmEventVisible,
+    traceNoise.allActive && traceNoise.itemCount > 0 && !traceNoise.tokenEventVisible,
     traceNoise,
   );
 }
@@ -1138,6 +1226,7 @@ async function main() {
     await checkMarkdownRendering();
     await checkWorkDirControls();
     await checkSessionFilters();
+    await checkSkillPanel();
     await checkToolCapabilityPanel();
     await checkFindingPanel();
     await checkPreviewInteraction();

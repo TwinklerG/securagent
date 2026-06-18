@@ -4,6 +4,7 @@ mod file_probe;
 mod find_files;
 mod list_directory;
 mod nvd_lookup;
+mod process;
 mod read_file;
 mod sandbox;
 mod search_content;

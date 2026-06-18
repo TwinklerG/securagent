@@ -3,8 +3,9 @@ import type { ConversationPanel } from "./ConversationPanel";
 import type { FindingPreview } from "./FindingPreview";
 import type { ProjectPanel } from "./ProjectPanel";
 import type { RunPanel } from "./RunPanel";
+import type { SkillCapability } from "./SkillCapability";
 import type { StatusPanel } from "./StatusPanel";
 import type { ToolCapability } from "./ToolCapability";
 import type { TraceEvent } from "./TraceEvent";
 
-export type AgentWorkbench = { project: ProjectPanel, conversation: ConversationPanel, run: RunPanel, status: StatusPanel, tools: Array<ToolCapability>, trace: Array<TraceEvent>, findings: Array<FindingPreview>, };
+export type AgentWorkbench = { project: ProjectPanel, conversation: ConversationPanel, run: RunPanel, status: StatusPanel, skills: Array<SkillCapability>, tools: Array<ToolCapability>, trace: Array<TraceEvent>, findings: Array<FindingPreview>, };

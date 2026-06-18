@@ -17,6 +17,7 @@ export type {
 export type { GuiTokenUsage } from "./bindings/GuiTokenUsage";
 export type { ProjectPanel } from "./bindings/ProjectPanel";
 export type { RunPanel } from "./bindings/RunPanel";
+export type { SkillCapability } from "./bindings/SkillCapability";
 export type { StatusPanel } from "./bindings/StatusPanel";
 export type { ToolCapability } from "./bindings/ToolCapability";
 export type { ToolParameter } from "./bindings/ToolParameter";

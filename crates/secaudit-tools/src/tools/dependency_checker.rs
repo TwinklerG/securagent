@@ -5,11 +5,11 @@ use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 use crate::error::Error;
 use crate::tools::Tool;
 
+use super::process::hidden_command;
 use super::sandbox::{SensitivePathPolicy, resolve_existing_path};
 
 // —— 参数字段名 ——
@@ -65,7 +65,7 @@ impl Default for DependencyChecker {
 
 /// 运行外部审计命令，返回输出文本。
 async fn run_audit(program: &str, args: &[&str], dir: &Path) -> Result<String, Error> {
-    let output = Command::new(program)
+    let output = hidden_command(program)
         .args(args)
         .current_dir(dir)
         .output()

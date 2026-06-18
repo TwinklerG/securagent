@@ -52,3 +52,7 @@ dev:
 # 启动浏览器预览服务（使用 mock 数据，不连接 Tauri 后端）
 preview:
     bun run --cwd {{ GUI_DIR }} dev
+
+# 构建
+build-release:
+    bun run --cwd {{ GUI_DIR }} tauri build

@@ -8,6 +8,7 @@ import {
   History,
   ListFilter,
   ShieldAlert,
+  Sparkles,
   Wrench,
 } from "lucide-vue-next";
 import { computed, nextTick, ref, watch } from "vue";
@@ -15,6 +16,7 @@ import { OPS_RAIL_MAX_WIDTH, OPS_RAIL_MIN_WIDTH } from "../constants";
 import type {
   FindingPreview,
   GuiContextUsage,
+  SkillCapability,
   StatusPanel,
   ToolCapability,
   ToolParameter,
@@ -25,6 +27,7 @@ import { formatTraceTimeLabel } from "../utils/time";
 const props = defineProps<{
   trace: Array<TraceEvent>;
   status: StatusPanel | null;
+  skills: Array<SkillCapability>;
   tools: Array<ToolCapability>;
   findings: Array<FindingPreview>;
   width: number;
@@ -42,7 +45,7 @@ const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-type OpsTabId = "status" | "trace" | "confirm" | "tools" | "findings";
+type OpsTabId = "status" | "trace" | "confirm" | "skills" | "tools" | "findings";
 type TraceFilterId = "all" | "state" | "tool" | "subagent" | "compact" | "error";
 type StatusMetric = {
   label: string;
@@ -245,6 +248,11 @@ const statusMetrics = computed<Array<StatusMetric>>(() => [
     tone: "text-[#2f765e]",
   },
   {
+    label: "Skill",
+    value: formatCount(props.skills.length),
+    tone: "text-[#365d78]",
+  },
+  {
     label: "发现",
     value: formatCount(props.findings.length),
     tone: "text-[#9b2d25]",
@@ -291,6 +299,7 @@ const tabItems = computed(() => [
   },
   { id: "trace" as const, label: "轨迹", count: props.trace.length, icon: History },
   { id: "confirm" as const, label: "确认", count: toolConfirmEvents.value.length, icon: ShieldAlert },
+  { id: "skills" as const, label: "Skill", count: props.skills.length, icon: Sparkles },
   { id: "tools" as const, label: "工具", count: props.tools.length, icon: Wrench },
   { id: "findings" as const, label: "发现", count: props.findings.length, icon: FileSearch },
 ]);
@@ -665,6 +674,13 @@ function copyTraceDetail(item: TraceEvent) {
   void navigator.clipboard.writeText(`${traceKindLabel(item.kind)} ${item.title}\n${item.detail}`);
 }
 
+function copySkillCommand(skill: SkillCapability) {
+  if (!navigator.clipboard) {
+    return;
+  }
+  void navigator.clipboard.writeText(skill.command);
+}
+
 function traceTimeLabel(item: TraceEvent): string {
   return formatTraceTimeLabel(item.occurredAt);
 }
@@ -691,7 +707,7 @@ function findingStatusClass(status: FindingPreview["status"]): string {
       @pointerdown="beginResize"
     />
 
-    <nav class="grid grid-cols-5 gap-1.5 border-b border-[rgba(39,48,40,0.14)] p-[14px] pb-3">
+    <nav class="grid grid-cols-6 gap-1.5 border-b border-[rgba(39,48,40,0.14)] p-[14px] pb-3">
       <button
         v-for="tab in tabItems"
         :key="tab.id"
@@ -729,7 +745,7 @@ function findingStatusClass(status: FindingPreview["status"]): string {
       </div>
 
       <div
-        class="mb-3 grid grid-cols-4 gap-1.5 rounded-lg border border-[rgba(39,48,40,0.12)] bg-[rgba(255,252,244,0.66)] p-2 text-center"
+        class="mb-3 grid grid-cols-5 gap-1.5 rounded-lg border border-[rgba(39,48,40,0.12)] bg-[rgba(255,252,244,0.66)] p-2 text-center"
         data-testid="status-metrics"
       >
         <span
@@ -1012,6 +1028,57 @@ function findingStatusClass(status: FindingPreview["status"]): string {
           </p>
         </article>
         <p v-if="toolConfirmEvents.length === 0" class="text-xs text-[#667166]">暂无确认记录</p>
+      </div>
+    </section>
+
+    <section v-else-if="activeTab === 'skills'" class="flex min-h-0 flex-1 flex-col p-[18px] pt-4">
+      <div class="mb-2.5 flex items-center justify-between gap-2">
+        <div class="flex min-w-0 items-center gap-2 text-[13px] font-black text-[#334235]">
+          <Sparkles :size="17" />
+          <span>Skill 能力</span>
+        </div>
+        <span
+          class="rounded-full border border-[rgba(39,48,40,0.13)] bg-[rgba(255,252,244,0.7)] px-2 py-1 text-[11px] font-black text-[#4c584d]"
+          data-testid="skill-count"
+        >
+          {{ skills.length }} 项
+        </span>
+      </div>
+      <div class="grid min-h-0 gap-2 overflow-auto pr-1" data-testid="skill-list">
+        <article
+          v-for="skill in skills"
+          :key="skill.name"
+          class="rounded-lg border border-[rgba(39,48,40,0.13)] bg-[rgba(255,252,244,0.72)] p-2.5"
+          data-testid="skill-item"
+        >
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <strong class="block text-xs font-black text-[#20291f] [overflow-wrap:anywhere]">
+                {{ skill.name }}
+              </strong>
+              <code
+                class="mt-1 inline-flex max-w-full rounded-md border border-[#b8c8d5] bg-[#e4ecf2] px-2 py-1 text-[11px] font-black text-[#365d78] [overflow-wrap:anywhere]"
+                data-testid="skill-command"
+              >
+                {{ skill.command }}
+              </code>
+            </div>
+            <button
+              type="button"
+              class="inline-flex shrink-0 items-center gap-1 rounded-md border border-[rgba(39,48,40,0.12)] bg-[rgba(255,252,244,0.7)] px-2 py-1 text-[11px] font-black text-[#4c584d]"
+              title="复制 Skill 命令"
+              data-testid="skill-copy"
+              @click="copySkillCommand(skill)"
+            >
+              <ClipboardCopy :size="13" />
+              <span>复制</span>
+            </button>
+          </div>
+          <p class="mt-2 text-xs leading-[1.45] text-[#4c584d] [overflow-wrap:anywhere]">
+            {{ skill.description }}
+          </p>
+        </article>
+        <p v-if="skills.length === 0" class="text-xs text-[#667166]">暂无可用 Skill</p>
       </div>
     </section>
 
